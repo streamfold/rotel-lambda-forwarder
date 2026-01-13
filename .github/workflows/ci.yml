@@ -9,18 +9,19 @@ env:
 
 jobs:
   test:
-    name: test - ${{ matrix.target }}
+    name: test - ${{ matrix.arch }}
     strategy:
       fail-fast: true
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
+            arch: x86_64
             runner: ubuntu-latest
             os: ubuntu
-          # Uncomment when public
-          # - target: aarch64-unknown-linux-gnu
-          #   runner: ubuntu-24.04-arm
-          #   os: ubuntu
+          - target: aarch64-unknown-linux-gnu
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            os: ubuntu
     runs-on: ${{ matrix.runner }}
 
     permissions:

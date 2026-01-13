@@ -11,7 +11,7 @@ env:
 
 jobs:
   build:
-    name: build - ${{ matrix.target }}
+    name: build - ${{ matrix.arch }}
     strategy:
       fail-fast: true
       matrix:
@@ -20,10 +20,10 @@ jobs:
             arch: x86_64
             runner: ubuntu-latest
             os: ubuntu
-          # Uncomment when public
-          # - target: aarch64-unknown-linux-gnu
-          #   runner: ubuntu-24.04-arm
-          #   os: ubuntu
+          - target: aarch64-unknown-linux-gnu
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            os: ubuntu
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -53,12 +53,12 @@ jobs:
       - name: upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rotel-lambda-forwarder-${{ matrix.target }}
+          name: rotel-lambda-forwarder-${{ matrix.arch }}
           path: target/lambda/rotel-lambda-forwarder/bootstrap.zip
           if-no-files-found: error
 
   upload:
-    name: upload - ${{ matrix.target }}
+    name: upload - ${{ matrix.arch }}
     needs: build
     strategy:
       fail-fast: true
@@ -66,9 +66,8 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             arch: x86_64
-          # Uncomment when public
-          # - target: aarch64-unknown-linux-gnu
-          #   arch: aarch64
+          - target: aarch64-unknown-linux-gnu
+            arch: arm64
     runs-on: ubuntu-latest
 
     env:
@@ -82,7 +81,7 @@ jobs:
       - name: download artifact
         uses: actions/download-artifact@v4
         with:
-          name: rotel-lambda-forwarder-${{ matrix.target }}
+          name: rotel-lambda-forwarder-${{ matrix.arch }}
           path: ./artifacts
 
       - name: configure AWS credentials
@@ -112,9 +111,8 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             arch: x86_64
-          # Uncomment when public
-          # - target: aarch64-unknown-linux-gnu
-          #   arch: aarch64
+          - target: aarch64-unknown-linux-gnu
+            arch: arm64
 
     runs-on: ubuntu-latest
 

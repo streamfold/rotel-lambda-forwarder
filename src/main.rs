@@ -127,12 +127,17 @@ async fn run_forwarder(
             agent_args.exporter = Some(Exporter::Blackhole);
         }
 
-        let agent = Agent::new(agent_args, HashMap::new(), SENDING_QUEUE_SIZE, env.to_string())
-            .with_logs_rx(logs_rx, flush_logs_sub)
-            .disable_otlp_default_receiver() // only receive from logs_rx
-            .with_pipeline_flush(flush_pipeline_sub)
-            .with_exporters_flush(flush_exporters_sub)
-            .with_init_complete_chan(init_wait_tx);
+        let agent = Agent::new(
+            agent_args,
+            HashMap::new(),
+            SENDING_QUEUE_SIZE,
+            env.to_string(),
+        )
+        .with_logs_rx(logs_rx, flush_logs_sub)
+        .disable_otlp_default_receiver() // only receive from logs_rx
+        .with_pipeline_flush(flush_pipeline_sub)
+        .with_exporters_flush(flush_exporters_sub)
+        .with_init_complete_chan(init_wait_tx);
         let token = agent_cancel.clone();
         let agent_fut = async move { agent.run(token).await };
 

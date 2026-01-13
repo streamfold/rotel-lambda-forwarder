@@ -1,0 +1,202 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+  YQ_VERSION: 4.50.1
+
+jobs:
+  build:
+    name: build - ${{ matrix.target }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            runner: ubuntu-latest
+            os: ubuntu
+          # Uncomment when public
+          # - target: aarch64-unknown-linux-gnu
+          #   runner: ubuntu-24.04-arm
+          #   os: ubuntu
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: update apt cache
+        run: sudo apt-get update
+
+      - name: install protoc
+        run: sudo apt-get install -y protobuf-compiler
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+          rustflags: ""
+
+      - name: install cargo lambda
+        run: |
+          pip3 install cargo-lambda
+
+      - name: build
+        uses: actions-rs/cargo@v1
+        with:
+          command: lambda
+          args: build --release -o zip --target ${{ matrix.target }}
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rotel-lambda-forwarder-${{ matrix.target }}
+          path: target/lambda/rotel-lambda-forwarder/bootstrap.zip
+          if-no-files-found: error
+
+  upload:
+    name: upload - ${{ matrix.target }}
+    needs: build
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
+          # Uncomment when public
+          # - target: aarch64-unknown-linux-gnu
+          #   arch: aarch64
+    runs-on: ubuntu-latest
+
+    env:
+      S3_BUCKET: rotel-lambda-forwarder
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rotel-lambda-forwarder-${{ matrix.target }}
+          path: ./artifacts
+
+      - name: configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.S3_FORWARDER_ARN }}
+          aws-region: us-east-1
+
+      - name: upload to S3 by version
+        run: |
+          S3_PATH="s3://${{ env.S3_BUCKET }}/rotel-lambda-forwarder/${{ github.ref_name }}/${{ matrix.arch }}/rotel-lambda-forwarder.zip"
+          aws s3 cp ./artifacts/bootstrap.zip "$S3_PATH" --acl public-read
+          echo "Uploaded to $S3_PATH"
+
+      - name: upload to S3 latest
+        run: |
+          S3_PATH="s3://${{ env.S3_BUCKET }}/rotel-lambda-forwarder/latest/${{ matrix.arch }}/rotel-lambda-forwarder.zip"
+          aws s3 cp ./artifacts/bootstrap.zip "$S3_PATH" --acl public-read
+          echo "Uploaded to $S3_PATH"
+
+  upload-gh-release:
+    name: upload GH release - ${{ matrix.target }}
+    needs: build
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
+          # Uncomment when public
+          # - target: aarch64-unknown-linux-gnu
+          #   arch: aarch64
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rotel-lambda-forwarder-${{ matrix.target }}
+          path: ./artifacts
+
+      - name: upload to GH release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          id=$(gh api -H "Accept: application/vnd.github+json" /repos/${{ github.repository }}/releases/tags/${{ github.ref_name }} --jq .id)
+          curl --fail-with-body -sS  -X POST --data-binary @"./artifacts/bootstrap.zip" -H 'Content-Type: application/octet-stream' -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "https://uploads.github.com/repos/${{ github.repository }}/releases/$id/assets?name=rotel-lambda-forwarder-${{ github.ref_name }}_${{ matrix.arch }}.zip"
+
+  upload-cloudformation:
+    name: upload cloudformation - ${{ matrix.arch }}
+    needs: build
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
+          # Uncomment when public
+          # - target: aarch64-unknown-linux-gnu
+          #   arch: aarch64
+
+    runs-on: ubuntu-latest
+
+    env:
+      ARTIFACT_S3_BUCKET: rotel-lambda-forwarder
+      S3_BUCKET: rotel-cloudformation
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: wget https://github.com/mikefarah/yq/releases/download/v$YQ_VERSION/yq_linux_amd64.tar.gz -O - | tar xz && mv yq_linux_amd64 /usr/local/bin/yq
+
+      - run: |
+          mkdir -p dist/latest
+          mkdir -p dist/versioned
+
+      - run: |
+          yq '.Parameters.S3Bucket.Default = "${{ env.ARTIFACT_S3_BUCKET }}" |
+            .Parameters.S3Key.Default = "rotel-lambda-forwarder/latest/${{ matrix.arch }}/rotel-lambda-forwarder.zip"' \
+            ./cloudformation-stacks/forwarder-otlp.template.yaml > dist/latest/forwarder-otlp.yaml
+
+          yq '.Parameters.S3Bucket.Default = "${{ env.ARTIFACT_S3_BUCKET }}" |
+            .Parameters.S3Key.Default = "rotel-lambda-forwarder/latest/${{ matrix.arch }}/rotel-lambda-forwarder.zip"' \
+            ./cloudformation-stacks/forwarder-clickhouse.template.yaml > dist/latest/forwarder-clickhouse.yaml
+
+      - run: |
+          yq '.Parameters.S3Bucket.Default = "${{ env.ARTIFACT_S3_BUCKET }}" |
+            .Parameters.S3Key.Default = "rotel-lambda-forwarder/${{ github.ref_name }}/${{ matrix.arch }}/rotel-lambda-forwarder.zip"' \
+            ./cloudformation-stacks/forwarder-otlp.template.yaml > dist/versioned/forwarder-otlp.yaml
+
+          yq '.Parameters.S3Bucket.Default = "${{ env.ARTIFACT_S3_BUCKET }}" |
+            .Parameters.S3Key.Default = "rotel-lambda-forwarder/${{ github.ref_name }}/${{ matrix.arch }}/rotel-lambda-forwarder.zip"' \
+            ./cloudformation-stacks/forwarder-clickhouse.template.yaml > dist/versioned/forwarder-clickhouse.yaml
+
+      - name: configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.S3_CLOUDFORMATION_ARN }}
+          aws-region: us-east-1
+
+      - name: upload to S3 by version
+        run: |
+          S3_PATH_BASE="s3://${{ env.S3_BUCKET }}/stacks/${{ github.ref_name }}/${{ matrix.arch }}"
+
+          aws s3 cp ./dist/versioned/forwarder-otlp.yaml "${S3_PATH_BASE}/rotel-lambda-forwarder-otlp.yaml" --acl public-read
+          aws s3 cp ./dist/versioned/forwarder-clickhouse.yaml "${S3_PATH_BASE}/rotel-lambda-forwarder-clickhouse.yaml" --acl public-read
+
+      - name: upload to S3 latest
+        run: |
+          S3_PATH_BASE="s3://${{ env.S3_BUCKET }}/stacks/latest/${{ matrix.arch }}"
+
+          aws s3 cp ./dist/latest/forwarder-otlp.yaml "${S3_PATH_BASE}/rotel-lambda-forwarder-otlp.yaml" --acl public-read
+          aws s3 cp ./dist/latest/forwarder-clickhouse.yaml "${S3_PATH_BASE}/rotel-lambda-forwarder-clickhouse.yaml" --acl public-read

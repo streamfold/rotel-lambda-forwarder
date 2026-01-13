@@ -1,0 +1,37 @@
+[package]
+name = "rotel-lambda-forwarder"
+version = "0.0.1"
+edition = "2024"
+homepage = "https://github.com/streamfold/rotel-lambda-forwarder"
+readme = "README.md"
+
+[dependencies]
+aws_lambda_events = { version = "1.0.0", default-features = false, features = ["cloudwatch_logs"] }
+hex = "0.4"
+chrono = "0.4"
+clap = { version = "4.5.53", features = ["derive", "env"] }
+hyper = { version = "1", features = ["full"] }
+lambda_runtime = { version = "1.0.1", features = ["graceful-shutdown"] }
+lambda_runtime_api_client = "1.0.1"
+async-stream = "0.3"
+http-body-util = "0.1"
+http = "1.0"
+tokio-stream = "0.1"
+regex = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.145"
+tokio = { version = "1", features = ["macros"] }
+tokio-util = "0.7.13"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-appender = "0.2.3"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+tower = { version = "0.5.2", features = ["retry", "timeout"] }
+dotenvy = { git = "https://github.com/streamfold/dotenvy", branch = "custom-substitution" }
+rotel = { git = "https://github.com/streamfold/rotel", rev = "acf0afd00a0b990a760759cdf6f84668627ad0a4", default-features = false}
+#rotel = { path = "../rotel", default-features = false}
+lambda-extension = "1.0.1"
+opentelemetry-proto = "0.30.0"
+
+[dev-dependencies]
+futures-util = "0.3"

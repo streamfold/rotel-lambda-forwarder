@@ -1,0 +1,187 @@
+Description: Rotel Lambda Forwarder for OTLP
+AWSTemplateFormatVersion: 2010-09-09
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "OTLP Exporter Configuration"
+        Parameters:
+          - OtlpEndpoint
+          - OtlpProtocol
+          - OtlpCustomHeaders
+          - ResourceAttributes
+      - Label:
+          default: "Function Configuration"
+        Parameters:
+          - FunctionMemorySize
+          - FunctionTimeout
+      - Label:
+          default: "Artifact Configuration (Keep defaults)"
+        Parameters:
+          - S3Bucket
+          - S3Key
+    ParameterLabels:
+      OtlpEndpoint:
+        default: "OTLP Endpoint"
+      OtlpProtocol:
+        default: "OTLP Protocol"
+      OtlpCustomHeaders:
+        default: "Custom Headers"
+      ResourceAttributes:
+        default: "Resource Attributes"
+      FunctionMemorySize:
+        default: "Function Memory Size"
+      FunctionTimeout:
+        default: "Function Timeout"
+      S3Bucket:
+        default: "S3 Bucket"
+      S3Key:
+        default: "S3 Key"
+
+Parameters:
+  OtlpEndpoint:
+    Description: OTLP endpoint URL to send logs to.
+    Type: String
+    AllowedPattern: ".+" # required
+  OtlpProtocol:
+    Description: OTLP protocol to use
+    Type: String
+    Default: "grpc"
+    AllowedValues:
+      - grpc
+      - http
+  OtlpCustomHeaders:
+    Type: String
+    Description: Custom headers to include with OTLP requests, e.g., Authorization=Bearer token,X-Custom-Header=value. Leave empty for no custom headers.
+    Default: ""
+  ResourceAttributes:
+    Type: String
+    Description: Resource attributes to add to all telemetry data, e.g., service.name=my-service,deployment.environment=production. Leave empty for no additional attributes.
+    Default: ""
+  FunctionMemorySize:
+    Type: Number
+    Description: Memory size (in MB) allocated to the Lambda function.
+    Default: 256
+    MinValue: 128
+    MaxValue: 10240
+  FunctionTimeout:
+    Type: Number
+    Description: Timeout (in seconds) for the Lambda function.
+    Default: 30
+    MinValue: 15
+    MaxValue: 900
+  S3Bucket:
+    Type: String
+    Description: S3 bucket containing Rotel Lambda Forwarder.
+    Default: "" # updated on release
+  S3Key:
+    Type: String
+    Description: S3 key for the Rotel Lambda Forwarder.
+    Default: "" # updated on release
+Resources:
+  ForwarderLogGroup:
+    Type: "AWS::Logs::LogGroup"
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}"
+      RetentionInDays: 7
+      Tags:
+        - Key: "PartOf"
+          Value: !Ref AWS::StackName
+        - Key: "Platform"
+          Value: "Rotel"
+  ForwarderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - "sts:AssumeRole"
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      Tags:
+        - Key: "PartOf"
+          Value: !Ref AWS::StackName
+        - Key: "Role"
+          Value: "RotelLambdaForwarder"
+        - Key: "Platform"
+          Value: "Rotel"
+  ForwarderPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Effect: Allow
+            Resource: !GetAtt ForwarderLogGroup.Arn
+          - Action:
+              - lambda:AddPermission
+              - lambda:RemovePermission
+            Effect: Allow
+            Resource: !GetAtt ForwarderLambda.Arn
+      PolicyName: !Sub "${AWS::StackName}-forwarder-lambda-policy"
+      Roles:
+        - !Ref "ForwarderRole"
+  ForwarderLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref AWS::StackName
+      Runtime: provided.al2023
+      Handler: bootstrap
+      Code:
+        S3Bucket: !Ref S3Bucket
+        S3Key: !Ref S3Key
+      Role: !GetAtt
+        - ForwarderRole
+        - Arn
+      Timeout: !Ref FunctionTimeout
+      MemorySize: !Ref FunctionMemorySize
+      Architectures:
+        - x86_64
+      LoggingConfig:
+        LogGroup: !Ref ForwarderLogGroup
+      Tags:
+        - Key: "PartOf"
+          Value: !Ref AWS::StackName
+        - Key: "Role"
+          Value: "RotelLambdaForwarder"
+        - Key: "Platform"
+          Value: "Rotel"
+      Environment:
+        Variables:
+          ROTEL_EXPORTER: "otlp"
+          ROTEL_OTLP_EXPORTER_ENDPOINT: !Ref "OtlpEndpoint"
+          ROTEL_OTLP_EXPORTER_PROTOCOL: !Ref "OtlpProtocol"
+          ROTEL_OTLP_EXPORTER_CUSTOM_HEADERS: !Ref "OtlpCustomHeaders"
+          ROTEL_OTEL_RESOURCE_ATTRIBUTES: !Ref "ResourceAttributes"
+          ROTEL_EXPORTER_RETRY_MAX_ELAPSED_TIME: !Sub "${FunctionTimeout}s"
+  ForwarderLambdaPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+      - ForwarderLambda
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref "ForwarderLambda"
+      Principal: !Sub "logs.${AWS::Region}.amazonaws.com"
+      SourceAccount: !Ref "AWS::AccountId"
+      SourceArn: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*:*"
+Outputs:
+  ForwarderLambdaARN:
+    Description: The ARN of the created Forwarder Lambda
+    Value: !GetAtt ForwarderLambda.Arn
+  ForwarderLambdaName:
+    Description: The name of the created Forwarder Lambda
+    Value: !Ref ForwarderLambda
+  SetupInstructions:
+    Description: Instructions for setting up CloudWatch Logs subscription filters
+    Value: !Sub |
+      To forward logs from a CloudWatch log group to this forwarder, run:
+      aws logs put-subscription-filter \
+        --log-group-name YOUR_LOG_GROUP \
+        --filter-name forward-to-rotel \
+        --filter-pattern "" \
+        --destination-arn ${ForwarderLambda.Arn}

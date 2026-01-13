@@ -52,10 +52,25 @@ Launch this stack to export CloudWatch logs to ClickHouse.
 
 For production deployments, follow these steps to manually deploy the Lambda function using pre-built artifacts.
 
-The rotel-lambda-forwarder can be found at the following S3 locations:
+You can download pre-built deployment Lambda .zip files for x86_64 and arm64 architectures from the [Releases](https://github.com/streamfold/rotel-lambda-forwarder/releases) page, or from the following links:
 
-* By version: `s3://rotel-lambda-forwarder/rotel-lambda-forwarder/v{version}/x86_64/rotel-lambda-forwarder.zip`
-* Latest: `s3://rotel-lambda-forwarder/rotel-lambda-forwarder/latest/x86_64/rotel-lambda-forwarder.zip`
+| **Region**      | **x86_64** | **arm64** |
+|-----------------|------------|-----------|
+| us-east-1       | [Download](https://rotel-lambda-forwarder.s3.us-east-1.amazonaws.com/rotel-lambda-forwarder/latest/x86_64/rotel-lambda-forwarder.zip) | [Download](https://rotel-lambda-forwarder.s3.us-east-1.amazonaws.com/rotel-lambda-forwarder/latest/arm64/rotel-lambda-forwarder.zip) |
+
+
+The following us-east-1 S3 bucket contains pre-built files for any given release and architecture:
+
+```
+s3://rotel-lambda-forwarder/rotel-lambda-forwarder/v{version}/{arch}/rotel-lambda-forwarder.zip
+```
+
+for the latest release, use the URL:
+```
+s3://rotel-lambda-forwarder/rotel-lambda-forwarder/latest/{arch}/rotel-lambda-forwarder.zip
+```
+
+---
 
 *NOTE*: These are located in the AWS us-east-1 region, so you can only create Lambda functions in that same region. If
 you need to create the function in a different region, you'll need to copy the `rotel-lambda-forwarder.zip` to a different

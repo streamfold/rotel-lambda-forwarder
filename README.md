@@ -18,9 +18,10 @@ Unlisted services that log via CloudWatch will likely work, but may be missing c
 expand as we verify support for additional services.
 
 | **Source**             | **Location** |
-|------------------------|--------------|
+| ---------------------- | ------------ |
 | CodeBuild Logs         | CloudWatch   |
 | CloudWatch Logs        | CloudWatch   |
+| CloudTrail Logs        | CloudWatch   |
 | EKS Control Plane Logs | CloudWatch   |
 | Lambda Logs            | CloudWatch   |
 
@@ -35,18 +36,17 @@ instructions.
 
 Launch this stack to export CloudWatch logs to any OTLP compatible endpoint.
 
-| **Region**      | **x86_64** | **arm64** |
-|-----------------|------------|-----------|
-| `us-east-1`     | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?stackName=rotel-lambda-forwarder-otlp&templateURL=https://rotel-cloudformation.s3.us-east-1.amazonaws.com/stacks/latest/x86_64/rotel-lambda-forwarder-otlp.yaml) | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?stackName=rotel-lambda-forwarder-otlp&templateURL=https://rotel-cloudformation.s3.us-east-1.amazonaws.com/stacks/latest/arm64/rotel-lambda-forwarder-otlp.yaml) |
-
+| **Region**  | **x86_64**                                                                                                                                                                                                                                                                                                                                    | **arm64**                                                                                                                                                                                                                                                                                                                                    |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `us-east-1` | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?stackName=rotel-lambda-forwarder-otlp&templateURL=https://rotel-cloudformation.s3.us-east-1.amazonaws.com/stacks/latest/x86_64/rotel-lambda-forwarder-otlp.yaml) | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?stackName=rotel-lambda-forwarder-otlp&templateURL=https://rotel-cloudformation.s3.us-east-1.amazonaws.com/stacks/latest/arm64/rotel-lambda-forwarder-otlp.yaml) |
 
 #### Export to ClickHouse
 
 Launch this stack to export CloudWatch logs to ClickHouse.
 
-| **Region**      | **x86_64** | **arm64** |
-|-----------------|------------|-----------|
-| `us-east-1`     | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?stackName=rotel-lambda-forwarder-clickhouse&templateURL=https://rotel-cloudformation.s3.us-east-1.amazonaws.com/stacks/latest/x86_64/rotel-lambda-forwarder-clickhouse.yaml) | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?stackName=rotel-lambda-forwarder-clickhouse&templateURL=https://rotel-cloudformation.s3.us-east-1.amazonaws.com/stacks/latest/arm64/rotel-lambda-forwarder-clickhouse.yaml) |
+| **Region**  | **x86_64**                                                                                                                                                                                                                                                                                                                                                | **arm64**                                                                                                                                                                                                                                                                                                                                                |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `us-east-1` | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?stackName=rotel-lambda-forwarder-clickhouse&templateURL=https://rotel-cloudformation.s3.us-east-1.amazonaws.com/stacks/latest/x86_64/rotel-lambda-forwarder-clickhouse.yaml) | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?stackName=rotel-lambda-forwarder-clickhouse&templateURL=https://rotel-cloudformation.s3.us-east-1.amazonaws.com/stacks/latest/arm64/rotel-lambda-forwarder-clickhouse.yaml) |
 
 ### Manual Deployment to AWS
 
@@ -54,10 +54,9 @@ For production deployments, follow these steps to manually deploy the Lambda fun
 
 You can download pre-built deployment Lambda .zip files for x86_64 and arm64 architectures from the [Releases](https://github.com/streamfold/rotel-lambda-forwarder/releases) page, or from the following links:
 
-| **Region**      | **x86_64** | **arm64** |
-|-----------------|------------|-----------|
-| us-east-1       | [Download](https://rotel-lambda-forwarder.s3.us-east-1.amazonaws.com/rotel-lambda-forwarder/latest/x86_64/rotel-lambda-forwarder.zip) | [Download](https://rotel-lambda-forwarder.s3.us-east-1.amazonaws.com/rotel-lambda-forwarder/latest/arm64/rotel-lambda-forwarder.zip) |
-
+| **Region** | **x86_64**                                                                                                                            | **arm64**                                                                                                                            |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| us-east-1  | [Download](https://rotel-lambda-forwarder.s3.us-east-1.amazonaws.com/rotel-lambda-forwarder/latest/x86_64/rotel-lambda-forwarder.zip) | [Download](https://rotel-lambda-forwarder.s3.us-east-1.amazonaws.com/rotel-lambda-forwarder/latest/arm64/rotel-lambda-forwarder.zip) |
 
 The following us-east-1 S3 bucket contains pre-built files for any given release and architecture:
 
@@ -66,13 +65,14 @@ s3://rotel-lambda-forwarder/rotel-lambda-forwarder/v{version}/{arch}/rotel-lambd
 ```
 
 for the latest release, use the URL:
+
 ```
 s3://rotel-lambda-forwarder/rotel-lambda-forwarder/latest/{arch}/rotel-lambda-forwarder.zip
 ```
 
 ---
 
-*NOTE*: These are located in the AWS us-east-1 region, so you can only create Lambda functions in that same region. If
+_NOTE_: These are located in the AWS us-east-1 region, so you can only create Lambda functions in that same region. If
 you need to create the function in a different region, you'll need to copy the `rotel-lambda-forwarder.zip` to a different
 bucket in the same region as the function.
 
@@ -126,8 +126,9 @@ aws lambda create-function \
 ```
 
 **Important parameters:**
+
 - `--runtime`: Use `provided.al2023` for Amazon Linux 2023 custom runtime
-- `--architectures`: Must match your build target (`x86_64`_
+- `--architectures`: Must match your build target (`x86_64`\_
 - `--timeout`: Adjust based on your log volume (recommended: 30 seconds)
 - `--memory-size`: Adjust based on log volume (recommended: 256-512 MB)
 
@@ -154,6 +155,38 @@ aws lambda update-function-configuration \
     ROTEL_OTLP_EXPORTER_ENDPOINT=https://your-otlp-endpoint.com,
   }"
 ```
+
+## Attribute mapping
+
+### Log record field mapping
+
+The forwarder will attempt to map attributes from a log line to top-level properties of
+the OTLP log record when possible. This may vary by log source.
+
+- `trace_id` and `span_id`: if they are present and these match the OTLP format they'll be promoted to the log record fields
+- `severity_text` and `severity_number`: attempts to map `level` field to severity fields if possible
+- `timestamp`: will be pulled from log fields if possible, or fallback to the observed time when it arrived at the lambda forwarder
+- `body`: will look for _log_, _msg_, or _message_ fields. Some log sources may construct an appropriate body text from custom
+  attribute fields
+
+If a log record can not be parsed into structured fields, the `body` of the log record will be set to the full string
+contents of the log.
+
+### Attribute mapping
+
+The remaining attributes that are not mapped to top-level log record fields are persisted and stored in the
+attributes field of the log record. The attribute names are kept identical to their original values
+in the incoming CloudWatch log record. The forwarder does not remap these field names by default.
+
+This is for several reasons:
+
+- **Translation loss**: it makes it challenging to translate concepts from AWS documentation if
+  field names are not mapped the same, requiring a guide to map between contexts
+- **Schema versioning**: changes to the mapping require versioning or migration in order
+  to not break existing queries
+
+The forwarder will add an `cloudwatch.id` field to the log record attributes that represents
+the unique ID of the log record in CloudWatch. This can be used to dedup unique log records.
 
 ## Configuration
 
@@ -217,6 +250,7 @@ aws logs put-subscription-filter \
 ```
 
 **Parameters:**
+
 - `--log-group-name`: The CloudWatch Logs log group to forward from
 - `--filter-name`: A name for the subscription filter
 - `--filter-pattern`: Log filter pattern (use `""` to forward all logs, or specify a pattern)

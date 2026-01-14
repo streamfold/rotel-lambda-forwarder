@@ -8,13 +8,15 @@ use regex::Regex;
 use serde_json::Value as JsonValue;
 use tracing::{debug, warn};
 
+use crate::parse::cwlogs::LogPlatform;
+
 /// Hex decode utilities
 fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
     hex::decode(s).map_err(|e| format!("Hex decode error: {}", e))
 }
 
 /// Parse a JSON log entry and populate a LogRecord
-pub fn parse_json_log_entry(msg: String, lr: &mut LogRecord) {
+pub fn parse_json_log_entry(platform: LogPlatform, msg: String, lr: &mut LogRecord) {
     // Parse the message as JSON
     let mut json_map: serde_json::Map<String, JsonValue> = match serde_json::from_str(&msg) {
         Ok(JsonValue::Object(map)) => map,
@@ -36,7 +38,7 @@ pub fn parse_json_log_entry(msg: String, lr: &mut LogRecord) {
         }
     };
 
-    // 1. Handle "level" field for severity
+    // Handle "level" field for severity
     if let Some(level_value) = json_map.remove("level")
         && let JsonValue::String(level_str) = &level_value
     {
@@ -49,7 +51,7 @@ pub fn parse_json_log_entry(msg: String, lr: &mut LogRecord) {
         }
     }
 
-    // 2. Check for body fields in order: 'msg', 'log', 'message'
+    // Check for body fields in order: 'msg', 'log', 'message'
     let body_keys = ["msg", "log", "message"];
     for key in body_keys {
         if let Some(body_value) = json_map.remove(key) {
@@ -58,7 +60,7 @@ pub fn parse_json_log_entry(msg: String, lr: &mut LogRecord) {
         }
     }
 
-    // 3. Check for timestamp fields: 'ts' or 'timestamp'
+    // Check for timestamp fields: 'ts' or 'timestamp'
     let timestamp_keys = ["ts", "timestamp"];
     for key in timestamp_keys {
         if let Some(ts_value) = json_map.remove(key) {
@@ -69,7 +71,7 @@ pub fn parse_json_log_entry(msg: String, lr: &mut LogRecord) {
         }
     }
 
-    // 4. Handle trace_id and span_id if they exist
+    // Handle trace_id and span_id if they exist
     if let Some(JsonValue::String(trace_id_str)) = json_map.remove("trace_id") {
         if let Ok(trace_bytes) = decode_hex(&trace_id_str) {
             if trace_bytes.len() == 16 {
@@ -100,7 +102,22 @@ pub fn parse_json_log_entry(msg: String, lr: &mut LogRecord) {
         }
     }
 
-    // 5. Convert remaining fields to attributes
+    // Special handling. For now inline, abstract this as we expand
+    if platform == LogPlatform::Cloudtrail && lr.body.is_none() {
+        let event_type = json_map.get("eventType");
+        let event_name = json_map.get("eventName");
+        lr.body = match (event_type, event_name) {
+            (Some(JsonValue::String(t)), Some(JsonValue::String(n))) => Some(AnyValue {
+                value: Some(Value::StringValue(format!("{}::{}", t, n))),
+            }),
+            (Some(JsonValue::String(t)), None) => Some(AnyValue {
+                value: Some(Value::StringValue(t.to_string())),
+            }),
+            (_, _) => None,
+        };
+    }
+
+    // Convert remaining fields to attributes
     for (key, value) in json_map {
         lr.attributes.push(KeyValue {
             key,
@@ -252,7 +269,7 @@ mod tests {
         let json_msg = r#"{"level":"info","msg":"test message"}"#.to_string();
         let mut log_record = LogRecord::default();
 
-        parse_json_log_entry(json_msg, &mut log_record);
+        parse_json_log_entry(LogPlatform::Unknown, json_msg, &mut log_record);
 
         assert_eq!(log_record.severity_number, SeverityNumber::Info as i32);
         assert_eq!(log_record.severity_text, "INFO");
@@ -264,7 +281,7 @@ mod tests {
         // Test 'msg' field
         let json_msg = r#"{"msg":"test message"}"#.to_string();
         let mut log_record = LogRecord::default();
-        parse_json_log_entry(json_msg, &mut log_record);
+        parse_json_log_entry(LogPlatform::Unknown, json_msg, &mut log_record);
         assert!(log_record.body.is_some());
         if let Some(body) = &log_record.body {
             if let Some(Value::StringValue(s)) = &body.value {
@@ -275,13 +292,13 @@ mod tests {
         // Test 'log' field (when 'msg' not present)
         let json_msg = r#"{"log":"test log"}"#.to_string();
         let mut log_record = LogRecord::default();
-        parse_json_log_entry(json_msg, &mut log_record);
+        parse_json_log_entry(LogPlatform::Unknown, json_msg, &mut log_record);
         assert!(log_record.body.is_some());
 
         // Test 'message' field (when 'msg' and 'log' not present)
         let json_msg = r#"{"message":"test message field"}"#.to_string();
         let mut log_record = LogRecord::default();
-        parse_json_log_entry(json_msg, &mut log_record);
+        parse_json_log_entry(LogPlatform::Unknown, json_msg, &mut log_record);
         assert!(log_record.body.is_some());
     }
 
@@ -290,7 +307,7 @@ mod tests {
         let json_msg = r#"{"ts":1234567890.5,"msg":"test"}"#.to_string();
         let mut log_record = LogRecord::default();
 
-        parse_json_log_entry(json_msg, &mut log_record);
+        parse_json_log_entry(LogPlatform::Unknown, json_msg, &mut log_record);
 
         // Should convert seconds to nanoseconds
         assert_eq!(log_record.time_unix_nano, 1234567890500000000);
@@ -301,7 +318,7 @@ mod tests {
         let json_msg = r#"{"timestamp":"2024-01-01T12:00:00Z","msg":"test"}"#.to_string();
         let mut log_record = LogRecord::default();
 
-        parse_json_log_entry(json_msg, &mut log_record);
+        parse_json_log_entry(LogPlatform::Unknown, json_msg, &mut log_record);
 
         // Should parse RFC3339 timestamp
         assert!(log_record.time_unix_nano > 0);
@@ -314,7 +331,7 @@ mod tests {
                 .to_string();
         let mut log_record = LogRecord::default();
 
-        parse_json_log_entry(json_msg, &mut log_record);
+        parse_json_log_entry(LogPlatform::Unknown, json_msg, &mut log_record);
 
         // Should have attributes for fields not extracted
         assert!(log_record.attributes.len() > 0);
@@ -335,7 +352,7 @@ mod tests {
             r#"{"msg":"test","trace_id":"0123456789abcdef0123456789abcdef"}"#.to_string();
         let mut log_record = LogRecord::default();
 
-        parse_json_log_entry(json_msg, &mut log_record);
+        parse_json_log_entry(LogPlatform::Unknown, json_msg, &mut log_record);
 
         assert_eq!(log_record.trace_id.len(), 16);
     }
@@ -345,7 +362,7 @@ mod tests {
         let json_msg = r#"{"msg":"test","span_id":"0123456789abcdef"}"#.to_string();
         let mut log_record = LogRecord::default();
 
-        parse_json_log_entry(json_msg, &mut log_record);
+        parse_json_log_entry(LogPlatform::Unknown, json_msg, &mut log_record);
 
         assert_eq!(log_record.span_id.len(), 8);
     }
@@ -360,7 +377,7 @@ mod tests {
         .to_string();
         let mut log_record = LogRecord::default();
 
-        parse_json_log_entry(json_msg, &mut log_record);
+        parse_json_log_entry(LogPlatform::Unknown, json_msg, &mut log_record);
 
         assert_eq!(log_record.trace_id.len(), 16);
         assert_eq!(log_record.span_id.len(), 8);
@@ -371,7 +388,7 @@ mod tests {
         let json_msg = r#"{"msg":"test","trace_id":"0123456789abcdef"}"#.to_string();
         let mut log_record = LogRecord::default();
 
-        parse_json_log_entry(json_msg, &mut log_record);
+        parse_json_log_entry(LogPlatform::Unknown, json_msg, &mut log_record);
 
         // trace_id should be empty because it's not 16 bytes
         assert_eq!(log_record.trace_id.len(), 0);
@@ -382,7 +399,7 @@ mod tests {
         let json_msg = r#"{"msg":"test","span_id":"0123"}"#.to_string();
         let mut log_record = LogRecord::default();
 
-        parse_json_log_entry(json_msg, &mut log_record);
+        parse_json_log_entry(LogPlatform::Unknown, json_msg, &mut log_record);
 
         // span_id should be empty because it's not 8 bytes
         assert_eq!(log_record.span_id.len(), 0);
@@ -393,7 +410,7 @@ mod tests {
         let json_msg = r#"{"msg":"test","trace_id":"not-a-hex-string-xxxxxxx"}"#.to_string();
         let mut log_record = LogRecord::default();
 
-        parse_json_log_entry(json_msg, &mut log_record);
+        parse_json_log_entry(LogPlatform::Unknown, json_msg, &mut log_record);
 
         assert_eq!(log_record.trace_id.len(), 0);
     }
@@ -459,5 +476,74 @@ mod tests {
         let json_val = JsonValue::Array(vec![JsonValue::String("a".to_string())]);
         let any_val = json_value_to_any_value(json_val);
         assert!(matches!(any_val.value, Some(Value::ArrayValue(_))));
+    }
+
+    #[test]
+    fn test_parse_cloudtrail_aws_vpce_event() {
+        let json_msg = r#"{
+    "eventVersion": "1.09",
+    "userIdentity": {
+        "type": "AssumedRole",
+        "principalId": "ASIAIOSFODNN7EXAMPLE:role-name",
+        "arn": "arn:aws:sts::123456789012:assumed-role/Admin/role-name",
+        "accountId": "123456789012",
+        "accessKeyId": "ASIAIOSFODNN7EXAMPLE",
+        "sessionContext": {
+            "sessionIssuer": {
+                "type": "Role",
+                "principalId": "ASIAIOSFODNN7EXAMPLE",
+                "arn": "arn:aws:iam::123456789012:role/Admin",
+                "accountId": "123456789012",
+                "userName": "Admin"
+            },
+            "attributes": {
+                "creationDate": "2024-06-04T23:10:46Z",
+                "mfaAuthenticated": "false"
+            }
+        }
+    },
+    "eventTime": "2024-06-04T23:12:50Z",
+    "eventSource": "kms.amazonaws.com",
+    "eventName": "ListKeys",
+    "awsRegion": "us-east-1",
+    "sourceIPAddress": "192.0.2.0",
+    "requestID": "16bcc089-ac49-43f1-9177-EXAMPLE23731",
+    "eventID": "228ca3c8-5f95-4a8a-9732-EXAMPLE60ed9",
+    "eventType": "AwsVpceEvent",
+    "recipientAccountId": "123456789012",
+    "sharedEventID": "a1f3720c-ef19-47e9-a5d5-EXAMPLE8099f",
+    "vpcEndpointId": "vpce-EXAMPLE08c1b6b9b7",
+    "vpcEndpointAccountId": "123456789012",
+    "eventCategory": "NetworkActivity"
+}"#
+        .to_string();
+        let mut log_record = LogRecord::default();
+
+        parse_json_log_entry(LogPlatform::Cloudtrail, json_msg, &mut log_record);
+
+        // Verify the body is set to "AwsVpceEvent::ListKeys"
+        assert!(log_record.body.is_some());
+        if let Some(body) = &log_record.body {
+            if let Some(Value::StringValue(s)) = &body.value {
+                assert_eq!(s, "AwsVpceEvent::ListKeys");
+            } else {
+                panic!("Expected StringValue in body");
+            }
+        }
+
+        // Verify that eventType and eventName are still in attributes
+        let has_event_type = log_record.attributes.iter().any(|kv| kv.key == "eventType");
+        let has_event_name = log_record.attributes.iter().any(|kv| kv.key == "eventName");
+        assert!(has_event_type);
+        assert!(has_event_name);
+
+        // Verify other fields are present as attributes
+        let has_event_source = log_record
+            .attributes
+            .iter()
+            .any(|kv| kv.key == "eventSource");
+        let has_aws_region = log_record.attributes.iter().any(|kv| kv.key == "awsRegion");
+        assert!(has_event_source);
+        assert!(has_aws_region);
     }
 }

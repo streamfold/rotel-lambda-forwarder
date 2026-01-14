@@ -1,8 +1,14 @@
-
 use aws_lambda_events::cloudwatch_logs::LogEntry;
-use opentelemetry_proto::tonic::{common::v1::{AnyValue, KeyValue, any_value::Value}, logs::v1::LogRecord};
+use opentelemetry_proto::tonic::{
+    common::v1::{AnyValue, KeyValue, any_value::Value},
+    logs::v1::LogRecord,
+};
 
-use crate::parse::{cwlogs::{LogPlatform, ParserType}, json::parse_json_log_entry, keyvalue::parse_keyvalue_log_entry};
+use crate::parse::{
+    cwlogs::{LogPlatform, ParserType},
+    json::parse_json_log_entry,
+    keyvalue::parse_keyvalue_log_entry,
+};
 
 pub(crate) struct RecordParser {
     platform: LogPlatform,
@@ -11,18 +17,18 @@ pub(crate) struct RecordParser {
 
 impl RecordParser {
     pub(crate) fn new(platform: LogPlatform, parser_type: ParserType) -> Self {
-        Self{
+        Self {
             platform,
             parser_type,
         }
     }
-    
+
     pub(crate) fn parse(&self, now_nanos: u64, log_entry: LogEntry) -> LogRecord {
         let mut lr = LogRecord {
             time_unix_nano: (log_entry.timestamp * 1_000_000) as u64,
             observed_time_unix_nano: now_nanos,
             attributes: vec![KeyValue {
-                key: "id".to_string(),
+                key: "cloudwatch.id".to_string(),
                 value: Some(AnyValue {
                     value: Some(Value::StringValue(log_entry.id)),
                 }),

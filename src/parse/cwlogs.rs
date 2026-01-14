@@ -1,14 +1,15 @@
-use aws_lambda_events::cloudwatch_logs::{LogEntry, LogsEvent};
+use regex::Regex;
+use std::sync::LazyLock;
+
+use aws_lambda_events::cloudwatch_logs::LogsEvent;
 use opentelemetry_proto::tonic::{
     common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value::Value},
-    logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
+    logs::v1::{ResourceLogs, ScopeLogs},
     resource::v1::Resource,
 };
 use tracing::debug;
 
-use super::json::parse_json_log_entry;
-use super::keyvalue::parse_keyvalue_log_entry;
-use crate::aws_attributes::AwsAttributes;
+use crate::{aws_attributes::AwsAttributes, parse::record_parser::RecordParser};
 
 /// Parser handles the conversion of AWS CloudWatch Logs events into OpenTelemetry ResourceLogs
 pub struct Parser<'a> {
@@ -108,10 +109,11 @@ impl<'a> Parser<'a> {
             });
         }
 
+        let rec_parser = RecordParser::new(log_platform, parser_type);
         let log_records = log_data
             .log_events
             .into_iter()
-            .map(|log| Parser::parse_log_entry(now_nanos, log, parser_type))
+            .map(|log| rec_parser.parse(now_nanos, log))
             .collect();
 
         let resource_logs = ResourceLogs {
@@ -144,42 +146,6 @@ impl<'a> Parser<'a> {
 
         Ok(resource_logs_list)
     }
-
-    fn parse_log_entry(now_nanos: u64, log_entry: LogEntry, parser_type: ParserType) -> LogRecord {
-        let mut lr = LogRecord {
-            time_unix_nano: (log_entry.timestamp * 1_000_000) as u64,
-            observed_time_unix_nano: now_nanos,
-            attributes: vec![KeyValue {
-                key: "id".to_string(),
-                value: Some(AnyValue {
-                    value: Some(Value::StringValue(log_entry.id)),
-                }),
-            }],
-            dropped_attributes_count: 0,
-            ..Default::default()
-        };
-
-        match parser_type {
-            ParserType::Json => {
-                parse_json_log_entry(log_entry.message, &mut lr);
-            }
-            ParserType::KeyValue => {
-                parse_keyvalue_log_entry(log_entry.message, &mut lr);
-            }
-            ParserType::Unknown => {
-                // Auto-detect: try JSON first, otherwise plain text
-                if log_entry.message.len() > 2 && log_entry.message.starts_with("{") {
-                    parse_json_log_entry(log_entry.message, &mut lr);
-                } else {
-                    lr.body = Some(AnyValue {
-                        value: Some(Value::StringValue(log_entry.message)),
-                    });
-                }
-            }
-        }
-
-        lr
-    }
 }
 
 /// Detect AWS platform from log group name
@@ -191,6 +157,7 @@ pub enum LogPlatform {
     Rds,
     Lambda,
     Codebuild,
+    Cloudtrail,
     Unknown,
 }
 
@@ -203,6 +170,7 @@ impl LogPlatform {
             LogPlatform::Rds => "aws_rds",
             LogPlatform::Lambda => "aws_lambda",
             LogPlatform::Codebuild => "aws_codebuild",
+            LogPlatform::Cloudtrail => "aws_cloudtrail",
             LogPlatform::Unknown => "aws_unknown",
         }
     }
@@ -219,8 +187,34 @@ pub enum ParserType {
 
 /// Detects the log platform and parser type based on log group and stream names
 fn detect_log_type(log_group_name: &str, log_stream_name: &str) -> (LogPlatform, ParserType) {
-    // First, detect the platform from the log group name
-    let platform = if let Some(rest) = log_group_name.strip_prefix("/aws/") {
+    // First, detect the platform
+    let platform = detect_log_platform(log_group_name, log_stream_name);
+
+    // Then, determine the parser type based on platform and log stream name
+    let parser_type = match platform {
+        LogPlatform::Eks => {
+            if log_stream_name.starts_with("authenticator-") {
+                ParserType::KeyValue
+            } else {
+                ParserType::Unknown
+            }
+        }
+        LogPlatform::Cloudtrail => ParserType::Json,
+        _ => ParserType::Unknown,
+    };
+
+    (platform, parser_type)
+}
+
+static CLOUDTRAIL_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\d{12}_CloudTrail_").unwrap());
+
+fn detect_log_platform(log_group_name: &str, log_stream_name: &str) -> LogPlatform {
+    if CLOUDTRAIL_REGEX.is_match(log_stream_name) {
+        return LogPlatform::Cloudtrail;
+    }
+
+    if let Some(rest) = log_group_name.strip_prefix("/aws/") {
         if rest.starts_with("eks/") {
             LogPlatform::Eks
         } else if rest.starts_with("ecs/") {
@@ -236,21 +230,7 @@ fn detect_log_type(log_group_name: &str, log_stream_name: &str) -> (LogPlatform,
         }
     } else {
         LogPlatform::Unknown
-    };
-
-    // Then, determine the parser type based on platform and log stream name
-    let parser_type = match platform {
-        LogPlatform::Eks => {
-            if log_stream_name.starts_with("authenticator-") {
-                ParserType::KeyValue
-            } else {
-                ParserType::Unknown
-            }
-        }
-        _ => ParserType::Unknown,
-    };
-
-    (platform, parser_type)
+    }
 }
 
 /// Errors that can occur during parsing
@@ -271,6 +251,8 @@ pub enum ParserError {
 
 #[cfg(test)]
 mod tests {
+    use aws_lambda_events::cloudwatch_logs::LogEntry;
+
     use super::*;
 
     #[test]
@@ -304,7 +286,8 @@ mod tests {
         log_entry.timestamp = 1000;
         log_entry.message = log_msg.to_string();
 
-        let log_record = Parser::parse_log_entry(123456789, log_entry, parser_type);
+        let rec_parser = RecordParser::new(platform, parser_type);
+        let log_record = rec_parser.parse(123456789, log_entry);
 
         // Verify the log was parsed correctly
         assert_eq!(log_record.severity_number, 9); // Info

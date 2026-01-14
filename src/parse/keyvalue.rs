@@ -4,11 +4,13 @@ use opentelemetry_proto::tonic::{
 };
 use tracing::{debug, warn};
 
+use crate::parse::cwlogs::LogPlatform;
+
 use super::json::map_log_level;
 
 /// Parse a key-value formatted log entry and populate a LogRecord
 /// Format: key=value key="quoted value" key=value
-pub fn parse_keyvalue_log_entry(msg: String, lr: &mut LogRecord) {
+pub fn parse_keyvalue_log_entry(_platform: LogPlatform, msg: String, lr: &mut LogRecord) {
     let pairs = parse_keyvalue_pairs(&msg);
 
     if pairs.is_empty() {
@@ -287,7 +289,7 @@ mod tests {
         let input = r#"time="2025-12-24T19:48:32Z" level=info msg="test message" user=john"#;
         let mut log_record = LogRecord::default();
 
-        parse_keyvalue_log_entry(input.to_string(), &mut log_record);
+        parse_keyvalue_log_entry(LogPlatform::Unknown, input.to_string(), &mut log_record);
 
         assert_eq!(log_record.severity_number, SeverityNumber::Info as i32);
         assert_eq!(log_record.severity_text, "INFO");
@@ -313,7 +315,7 @@ mod tests {
         let input = r#"level=warning msg="something went wrong""#;
         let mut log_record = LogRecord::default();
 
-        parse_keyvalue_log_entry(input.to_string(), &mut log_record);
+        parse_keyvalue_log_entry(LogPlatform::Unknown, input.to_string(), &mut log_record);
 
         assert_eq!(log_record.severity_number, SeverityNumber::Warn as i32);
         assert_eq!(log_record.severity_text, "WARN");
@@ -324,7 +326,7 @@ mod tests {
         let input = r#"msg="test" key1=value1 key2="value 2" key3=123"#;
         let mut log_record = LogRecord::default();
 
-        parse_keyvalue_log_entry(input.to_string(), &mut log_record);
+        parse_keyvalue_log_entry(LogPlatform::Unknown, input.to_string(), &mut log_record);
 
         assert_eq!(log_record.attributes.len(), 3);
 
@@ -342,7 +344,7 @@ mod tests {
         let input = r#"time="2024-01-01T12:00:00Z" msg="test""#;
         let mut log_record = LogRecord::default();
 
-        parse_keyvalue_log_entry(input.to_string(), &mut log_record);
+        parse_keyvalue_log_entry(LogPlatform::Unknown, input.to_string(), &mut log_record);
 
         // Should have parsed the timestamp
         assert!(log_record.time_unix_nano > 0);
@@ -359,7 +361,7 @@ mod tests {
         let input = "This is just plain text without any structured format";
         let mut log_record = LogRecord::default();
 
-        parse_keyvalue_log_entry(input.to_string(), &mut log_record);
+        parse_keyvalue_log_entry(LogPlatform::Unknown, input.to_string(), &mut log_record);
 
         // Should treat as plain text
         assert!(log_record.body.is_some());
@@ -377,7 +379,7 @@ mod tests {
         let input = r#"time="2025-12-24T19:48:32Z" level=info msg="access granted" arn="arn:aws:iam::927209226484:role/AWSWesleyClusterManagerLambda-Add-AddonManagerRole-1CRTQUJF13T5U" client="127.0.0.1:54812" groups="[]" method=POST path=/authenticate stsendpoint=sts.us-east-1.amazonaws.com uid="aws-iam-authenticator:927209226484:AROA5PYP2AD2FVXU23CA6" username="eks:addon-manager""#;
         let mut log_record = LogRecord::default();
 
-        parse_keyvalue_log_entry(input.to_string(), &mut log_record);
+        parse_keyvalue_log_entry(LogPlatform::Unknown, input.to_string(), &mut log_record);
 
         // Check severity
         assert_eq!(log_record.severity_number, SeverityNumber::Info as i32);

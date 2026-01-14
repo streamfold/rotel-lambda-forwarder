@@ -182,7 +182,7 @@ This is for several reasons:
 
 - **Translation loss**: it makes it challenging to translate concepts from AWS documentation if
   field names are not mapped the same, requiring a guide to map between contexts
-- **Extra schema versioning**: changes to the mapping require versioning or migration in order
+- **Schema versioning**: changes to the mapping require versioning or migration in order
   to not break existing queries
 
 The forwarder will add an `cloudwatch.id` field to the log record attributes that represents

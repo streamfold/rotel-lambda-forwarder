@@ -191,8 +191,8 @@ the unique ID of the log record in CloudWatch. This can be used to dedup unique 
 ## Field stripping
 
 The forwarder supports stripping message fields before they are converted to OTLP log
-record attributes. This allows sensitive, verbose, or otherwise uncessary fields before
-shipping them off to an exporter.
+record attributes. This allows sensitive, verbose, or otherwise uncessary fields to be
+removed before shipping them off to an exporter.
 
 This is hard-coded at the moment and is based on the platform the log record is received
 from. We plan to make this configurable in the future.

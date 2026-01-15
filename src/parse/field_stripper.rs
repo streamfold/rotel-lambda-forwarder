@@ -4,13 +4,6 @@
 //! based on JSON path identifiers. It supports recursive traversal of nested JSON
 //! structures to remove sensitive information like credentials, tokens, and keys.
 //!
-//! # Overview
-//!
-//! The field stripper uses a tree visitor pattern to recursively navigate through
-//! `serde_json::Map` structures and remove fields at specified JSON paths. This is
-//! particularly useful for sanitizing AWS CloudTrail logs that may contain sensitive
-//! credential information in response elements.
-//!
 
 use serde_json::Value as JsonValue;
 use tracing::debug;

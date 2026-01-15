@@ -1,38 +1,3 @@
-//! Record Parser Module
-//!
-//! This module provides a unified parser for CloudWatch log entries that handles
-//! both JSON and key-value formatted logs. It abstracts the parsing logic and
-//! field extraction into a common implementation.
-//!
-//! # Architecture
-//!
-//! The parsing flow is:
-//! 1. **Parse to Map**: Convert log message to `serde_json::Map` using format-specific parsers
-//!    - `parse_json_to_map()` for JSON logs
-//!    - `parse_keyvalue_to_map()` for key-value logs
-//! 2. **Strip Sensitive Fields**: Platform-specific field stripping (e.g., AWS credentials)
-//! 3. **Extract Common Fields**: Extract standard fields (level, body, timestamp, trace IDs)
-//! 4. **Platform-Specific Logic**: Apply platform-specific transformations (e.g., CloudTrail body)
-//! 5. **Convert to Attributes**: Convert remaining fields to OpenTelemetry attributes
-//!
-//! # Design Goals
-//!
-//! - **Separation of Concerns**: Format parsing is separate from field extraction
-//! - **Unified Processing**: Both JSON and key-value formats use the same field extraction logic
-//! - **Security**: Sensitive fields are automatically stripped based on platform
-//! - **Flexibility**: Easy to add new formats or platform-specific logic
-//!
-//! # Example
-//!
-//! ```rust,ignore
-//! use rotel_lambda_forwarder::parse::record_parser::RecordParser;
-//! use rotel_lambda_forwarder::parse::cwlogs::{LogPlatform, ParserType};
-//!
-//! let parser = RecordParser::new(LogPlatform::Cloudtrail, ParserType::Json);
-//! let log_record = parser.parse(now_nanos, log_entry);
-//! // log_record now contains parsed data with stripped credentials
-//! ```
-
 use std::sync::OnceLock;
 
 use aws_lambda_events::cloudwatch_logs::LogEntry;
@@ -74,13 +39,6 @@ impl RecordParser {
     }
 
     /// Parse a CloudWatch LogEntry into an OpenTelemetry LogRecord.
-    ///
-    /// This method:
-    /// 1. Parses the log message into a map based on the parser type
-    /// 2. Extracts common fields (level, body, timestamp, trace IDs)
-    /// 3. Applies platform-specific transformations
-    /// 4. Converts remaining fields to attributes
-    ///
     /// If parsing fails, the message is treated as plain text.
     pub(crate) fn parse(&self, now_nanos: u64, log_entry: LogEntry) -> LogRecord {
         let mut lr = LogRecord {

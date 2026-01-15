@@ -1,4 +1,4 @@
-FROM ubuntu:22.04
+FROM public.ecr.aws/lambda/python:3.13
 
 ARG TARGET_PLATFORM
 ARG RUST_VERSION
@@ -6,26 +6,25 @@ ARG RUST_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
+RUN dnf install -y \
+    # gcc \
+    # gcc-c++ \
     clang \
     make \
     cmake \
-    libssl-dev \
+    openssl-devel \
     protobuf-compiler \
-    libzstd-dev \
+    libzstd-devel \
     git \
     tar \
     gzip \
     perl \
-    curl \
     ca-certificates \
-    software-properties-common \
-    python3-pip \
+    #    python3-pip \
     zip \
     file \
-    && rm -rf /var/lib/apt/lists/*
+    #    python3-devel \
+    && dnf clean all
 
 # Install Rust
 RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${RUST_VERSION}
@@ -33,11 +32,6 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 RUN rustup target add ${TARGET_PLATFORM}
 
-RUN add-apt-repository ppa:deadsnakes/ppa
-RUN apt-get install -y python3.13-full python3.13-dev && ldconfig
-
-# Install cargo-lambda, ignore venv errors for now
-#RUN pip3 install --break-system-package cargo-lambda
 RUN pip3 install cargo-lambda
 
 WORKDIR /build
@@ -59,7 +53,10 @@ RUN mkdir -p src && \
 # Copy actual source code
 COPY src ./src
 
-ENV PYO3_PYTHON=/usr/bin/python3.13
+#ENV PYO3_PYTHON=/var/lang/bin/python3.13
+
+#ENV LD_LIBRARY_PATH=/lib64
+ENV CARGO_LAMBDA_COMPILER_EXTRA_ARGS="-L /lib64"
 
 # Build the Lambda function
 RUN touch src/main.rs && \

@@ -1,7 +1,9 @@
-FROM ubuntu:24.04
+FROM ubuntu:22.04
 
 ARG TARGET_PLATFORM
 ARG RUST_VERSION
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -35,7 +37,8 @@ RUN add-apt-repository ppa:deadsnakes/ppa
 RUN apt-get install -y python3.13-full python3.13-dev && ldconfig
 
 # Install cargo-lambda, ignore venv errors for now
-RUN pip3 install --break-system-package cargo-lambda
+#RUN pip3 install --break-system-package cargo-lambda
+RUN pip3 install cargo-lambda
 
 WORKDIR /build
 

@@ -43,18 +43,19 @@ docker-build:
 	# Extract bootstrap.zip from container
 	@echo "Extracting bootstrap.zip from container..."
 	@CONTAINER_ID=$$(docker create $(DOCKER_IMAGE)) && \
-	docker cp $$CONTAINER_ID:/build/target/lambda/rotel-lambda-forwarder/bootstrap.zip ./$(BOOTSTRAP_ZIP) && \
+	mkdir -p tmp/ &&
+	docker cp $$CONTAINER_ID:/build/target/lambda/rotel-lambda-forwarder/bootstrap.zip ./tmp/$(BOOTSTRAP_ZIP) && \
 	docker rm $$CONTAINER_ID
 
-	@echo "Build complete: $(BOOTSTRAP_ZIP)"
+	@echo "Build complete: ./tmp/$(BOOTSTRAP_ZIP)"
 
 # Deploy using Docker-built artifact
 deploy: docker-build
 	@echo "Deploying $(FUNC_NAME)..."
-	IAM_ROLE=$(IAM_ROLE) ./scripts/deploy-lambda.sh $(BOOTSTRAP_ZIP) $(FUNC_NAME)
+	IAM_ROLE=$(IAM_ROLE) ./scripts/deploy-lambda.sh ./tmp/$(BOOTSTRAP_ZIP) $(FUNC_NAME)
 
 # Clean build artifacts
 clean:
-	rm -f $(BOOTSTRAP_ZIP)
+	rm -f ./tmp/$(BOOTSTRAP_ZIP)
 	rm -rf target/
 	docker rmi $(DOCKER_IMAGE) 2>/dev/null || true

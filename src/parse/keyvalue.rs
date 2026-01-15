@@ -1,75 +1,36 @@
-use opentelemetry_proto::tonic::{
-    common::v1::{AnyValue, KeyValue, any_value::Value},
-    logs::v1::LogRecord,
-};
-use tracing::{debug, warn};
+//! Key-Value Parser Module
+//!
+//! This module provides key-value parsing functionality for CloudWatch log entries.
+//! It converts key-value formatted log messages (e.g., `key1=value1 key2="value 2"`)
+//! into `serde_json::Map` structures for unified processing.
+//!
 
-use crate::parse::cwlogs::LogPlatform;
+use serde_json::Value as JsonValue;
+use tracing::debug;
 
-use super::json::map_log_level;
+use crate::parse::{cwlogs::ParserError, record_parser::RecordParserError};
 
-/// Parse a key-value formatted log entry and populate a LogRecord
-/// Format: key=value key="quoted value" key=value
-pub fn parse_keyvalue_log_entry(_platform: LogPlatform, msg: String, lr: &mut LogRecord) {
-    let pairs = parse_keyvalue_pairs(&msg);
+/// Parse key-value pairs from a string and return as a serde_json::Map
+/// All values are stored as JsonValue::String
+/// Returns an error if no valid key-value pairs are found
+pub(crate) fn parse_keyvalue_to_map(
+    input: String,
+) -> Result<serde_json::Map<String, JsonValue>, RecordParserError> {
+    let pairs = parse_keyvalue_pairs(&input);
 
     if pairs.is_empty() {
-        // If parsing failed, treat as plain text
-        lr.body = Some(AnyValue {
-            value: Some(Value::StringValue(msg)),
-        });
-        return;
+        return Err(RecordParserError(
+            ParserError::InvalidFormat("No valid key-value pairs found".to_string()),
+            input,
+        ));
     }
 
-    // Process special keys and collect remaining as attributes
-    let mut body_set = false;
-    let mut level_set = false;
-    let mut time_set = false;
-
+    let mut map = serde_json::Map::new();
     for (key, value) in pairs {
-        match key.as_str() {
-            "msg" | "message" => {
-                if !body_set {
-                    lr.body = Some(AnyValue {
-                        value: Some(Value::StringValue(value)),
-                    });
-                    body_set = true;
-                }
-            }
-            "level" => {
-                if !level_set {
-                    if let Some((severity_number, severity_text)) = map_log_level(&value) {
-                        lr.severity_number = severity_number as i32;
-                        lr.severity_text = severity_text;
-                        level_set = true;
-                    } else {
-                        // Add as an attriute
-                        lr.attributes.push(KeyValue {
-                            key,
-                            value: Some(AnyValue {
-                                value: Some(Value::StringValue(value)),
-                            }),
-                        });
-                    }
-                }
-            }
-            "time" | "timestamp" => {
-                if !time_set && let Some(parsed_nanos) = parse_rfc3339_timestamp(&value) {
-                    lr.time_unix_nano = parsed_nanos;
-                    time_set = true;
-                }
-            }
-            _ => {
-                // Add as attribute
-                lr.attributes.push(KeyValue {
-                    key,
-                    value: Some(AnyValue {
-                        value: Some(Value::StringValue(value)),
-                    }),
-                });
-            }
-        }
+        map.insert(key, JsonValue::String(value));
     }
+
+    Ok(map)
 }
 
 /// Parse key-value pairs from a string
@@ -182,20 +143,32 @@ fn parse_keyvalue_pairs(input: &str) -> Vec<(String, String)> {
     pairs
 }
 
-/// Parse RFC3339 timestamp to nanoseconds since epoch
-fn parse_rfc3339_timestamp(value: &str) -> Option<u64> {
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
-        Some(dt.timestamp_nanos_opt().unwrap_or(0) as u64)
-    } else {
-        warn!("Failed to parse timestamp as RFC3339: {}", value);
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opentelemetry_proto::tonic::logs::v1::SeverityNumber;
+    use crate::parse::cwlogs::{LogPlatform, ParserType};
+    use crate::parse::record_parser::RecordParser;
+    use aws_lambda_events::cloudwatch_logs::LogEntry;
+    use opentelemetry_proto::tonic::{
+        common::v1::any_value::Value,
+        logs::v1::{LogRecord, SeverityNumber},
+    };
+
+    /// Test utility: Create a LogEntry from a message string
+    fn create_log_entry(message: &str) -> LogEntry {
+        let mut log_entry = LogEntry::default();
+        log_entry.id = "test-id".to_string();
+        log_entry.timestamp = 1000;
+        log_entry.message = message.to_string();
+        log_entry
+    }
+
+    /// Test utility: Parse a log message and return the LogRecord
+    fn parse_log_msg(message: &str, platform: LogPlatform) -> LogRecord {
+        let log_entry = create_log_entry(message);
+        let parser = RecordParser::new(platform, ParserType::KeyValue);
+        parser.parse(123456789, log_entry)
+    }
 
     #[test]
     fn test_parse_keyvalue_pairs_plain_text() {
@@ -287,9 +260,7 @@ mod tests {
     #[test]
     fn test_parse_keyvalue_log_entry_with_level() {
         let input = r#"time="2025-12-24T19:48:32Z" level=info msg="test message" user=john"#;
-        let mut log_record = LogRecord::default();
-
-        parse_keyvalue_log_entry(LogPlatform::Unknown, input.to_string(), &mut log_record);
+        let log_record = parse_log_msg(input, LogPlatform::Unknown);
 
         assert_eq!(log_record.severity_number, SeverityNumber::Info as i32);
         assert_eq!(log_record.severity_text, "INFO");
@@ -313,9 +284,7 @@ mod tests {
     #[test]
     fn test_parse_keyvalue_log_entry_warning_level() {
         let input = r#"level=warning msg="something went wrong""#;
-        let mut log_record = LogRecord::default();
-
-        parse_keyvalue_log_entry(LogPlatform::Unknown, input.to_string(), &mut log_record);
+        let log_record = parse_log_msg(input, LogPlatform::Unknown);
 
         assert_eq!(log_record.severity_number, SeverityNumber::Warn as i32);
         assert_eq!(log_record.severity_text, "WARN");
@@ -324,27 +293,29 @@ mod tests {
     #[test]
     fn test_parse_keyvalue_log_entry_attributes() {
         let input = r#"msg="test" key1=value1 key2="value 2" key3=123"#;
-        let mut log_record = LogRecord::default();
+        let log_record = parse_log_msg(input, LogPlatform::Unknown);
 
-        parse_keyvalue_log_entry(LogPlatform::Unknown, input.to_string(), &mut log_record);
-
-        assert_eq!(log_record.attributes.len(), 3);
+        // RecordParser adds cloudwatch.id attribute, so we expect 4 attributes total
+        assert_eq!(log_record.attributes.len(), 4);
 
         let key1 = log_record.attributes.iter().find(|kv| kv.key == "key1");
         let key2 = log_record.attributes.iter().find(|kv| kv.key == "key2");
         let key3 = log_record.attributes.iter().find(|kv| kv.key == "key3");
+        let cloudwatch_id = log_record
+            .attributes
+            .iter()
+            .find(|kv| kv.key == "cloudwatch.id");
 
         assert!(key1.is_some());
         assert!(key2.is_some());
         assert!(key3.is_some());
+        assert!(cloudwatch_id.is_some());
     }
 
     #[test]
     fn test_parse_keyvalue_log_entry_timestamp() {
         let input = r#"time="2024-01-01T12:00:00Z" msg="test""#;
-        let mut log_record = LogRecord::default();
-
-        parse_keyvalue_log_entry(LogPlatform::Unknown, input.to_string(), &mut log_record);
+        let log_record = parse_log_msg(input, LogPlatform::Unknown);
 
         // Should have parsed the timestamp
         assert!(log_record.time_unix_nano > 0);
@@ -359,9 +330,7 @@ mod tests {
     #[test]
     fn test_parse_keyvalue_log_entry_plain_text_fallback() {
         let input = "This is just plain text without any structured format";
-        let mut log_record = LogRecord::default();
-
-        parse_keyvalue_log_entry(LogPlatform::Unknown, input.to_string(), &mut log_record);
+        let log_record = parse_log_msg(input, LogPlatform::Unknown);
 
         // Should treat as plain text
         assert!(log_record.body.is_some());
@@ -377,9 +346,7 @@ mod tests {
     #[test]
     fn test_parse_keyvalue_log_entry_full_authenticator() {
         let input = r#"time="2025-12-24T19:48:32Z" level=info msg="access granted" arn="arn:aws:iam::927209226484:role/AWSWesleyClusterManagerLambda-Add-AddonManagerRole-1CRTQUJF13T5U" client="127.0.0.1:54812" groups="[]" method=POST path=/authenticate stsendpoint=sts.us-east-1.amazonaws.com uid="aws-iam-authenticator:927209226484:AROA5PYP2AD2FVXU23CA6" username="eks:addon-manager""#;
-        let mut log_record = LogRecord::default();
-
-        parse_keyvalue_log_entry(LogPlatform::Unknown, input.to_string(), &mut log_record);
+        let log_record = parse_log_msg(input, LogPlatform::Eks);
 
         // Check severity
         assert_eq!(log_record.severity_number, SeverityNumber::Info as i32);

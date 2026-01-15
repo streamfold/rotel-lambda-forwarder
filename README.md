@@ -188,6 +188,19 @@ This is for several reasons:
 The forwarder will add an `cloudwatch.id` field to the log record attributes that represents
 the unique ID of the log record in CloudWatch. This can be used to dedup unique log records.
 
+## Field stripping
+
+The forwarder supports stripping message fields before they are converted to OTLP log
+record attributes. This allows sensitive, verbose, or otherwise uncessary fields before
+shipping them off to an exporter.
+
+This is hard-coded at the moment and is based on the platform the log record is received
+from. We plan to make this configurable in the future.
+
+### EKS
+
+* Strips `responseElements.credentials.sessionToken`
+
 ## Configuration
 
 The Lambda function is configured via the same environment variables supported by Rotel,

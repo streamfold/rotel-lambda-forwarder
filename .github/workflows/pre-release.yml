@@ -97,6 +97,7 @@ jobs:
           echo "Uploaded to $S3_PATH"
 
       - name: upload to S3 latest
+        if: github.ref_name == 'main'
         run: |
           S3_PATH="s3://${{ env.S3_BUCKET }}/rotel-lambda-forwarder/latest/${{ matrix.arch }}/rotel-lambda-forwarder.zip"
           aws s3 cp ./artifacts/bootstrap.zip "$S3_PATH" --acl public-read
@@ -134,19 +135,23 @@ jobs:
 
       - run: |
           yq '.Parameters.S3Bucket.Default = "${{ env.ARTIFACT_S3_BUCKET }}" |
+            .Resources.ForwarderLambda.Properties.Architectures = ["${{ matrix.arch }}"] |
             .Parameters.S3Key.Default = "rotel-lambda-forwarder/latest/${{ matrix.arch }}/rotel-lambda-forwarder.zip"' \
             ./cloudformation-stacks/forwarder-otlp.template.yaml > dist/latest/forwarder-otlp.yaml
 
           yq '.Parameters.S3Bucket.Default = "${{ env.ARTIFACT_S3_BUCKET }}" |
+            .Resources.ForwarderLambda.Properties.Architectures = ["${{ matrix.arch }}"] |
             .Parameters.S3Key.Default = "rotel-lambda-forwarder/latest/${{ matrix.arch }}/rotel-lambda-forwarder.zip"' \
             ./cloudformation-stacks/forwarder-clickhouse.template.yaml > dist/latest/forwarder-clickhouse.yaml
 
       - run: |
           yq '.Parameters.S3Bucket.Default = "${{ env.ARTIFACT_S3_BUCKET }}" |
+            .Resources.ForwarderLambda.Properties.Architectures = ["${{ matrix.arch }}"] |
             .Parameters.S3Key.Default = "rotel-lambda-forwarder/${{ github.ref_name }}/${{ matrix.arch }}/rotel-lambda-forwarder.zip"' \
             ./cloudformation-stacks/forwarder-otlp.template.yaml > dist/versioned/forwarder-otlp.yaml
 
           yq '.Parameters.S3Bucket.Default = "${{ env.ARTIFACT_S3_BUCKET }}" |
+            .Resources.ForwarderLambda.Properties.Architectures = ["${{ matrix.arch }}"] |
             .Parameters.S3Key.Default = "rotel-lambda-forwarder/${{ github.ref_name }}/${{ matrix.arch }}/rotel-lambda-forwarder.zip"' \
             ./cloudformation-stacks/forwarder-clickhouse.template.yaml > dist/versioned/forwarder-clickhouse.yaml
 
@@ -164,6 +169,7 @@ jobs:
           aws s3 cp ./dist/versioned/forwarder-clickhouse.yaml "${S3_PATH_BASE}/rotel-lambda-forwarder-clickhouse.yaml" --acl public-read
 
       - name: upload to S3 latest
+        if: github.ref_name == 'main'
         run: |
           S3_PATH_BASE="s3://${{ env.S3_BUCKET }}/stacks/latest/${{ matrix.arch }}"
 

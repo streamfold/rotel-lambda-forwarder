@@ -47,7 +47,7 @@ COPY rust-toolchain.toml ./
 # Create a dummy main.rs to build dependencies
 RUN mkdir -p src && \
     echo "fn main() {}" > src/main.rs && \
-    cargo build --release --target ${TARGET_PLATFORM}; \
+    cargo build --release; \
     rm -rf src
 
 # Copy actual source code
@@ -56,11 +56,12 @@ COPY src ./src
 #ENV PYO3_PYTHON=/var/lang/bin/python3.13
 
 #ENV LD_LIBRARY_PATH=/lib64
-ENV CARGO_LAMBDA_COMPILER_EXTRA_ARGS="-L /lib64"
+#ENV CARGO_LAMBDA_COMPILER_EXTRA_ARGS="-L /lib64"
 
+ENV RUSTFLAGS="-L /lib64 -lc"
 # Build the Lambda function
 RUN touch src/main.rs && \
-    cargo lambda build --release --target ${TARGET_PLATFORM}
+    cargo lambda build --release
 
 RUN find /build/target -name 'bootstrap'
 

@@ -85,7 +85,7 @@ Parameters:
   ResourceAttributes:
     Type: String
     Description: Resource attributes to add to all telemetry data, e.g., service.name=my-service,deployment.environment=production. Leave empty for no additional attributes.
-    Default: ""
+    Default: "aws.function.name=rotel-lambda-forwarder"
   FunctionMemorySize:
     Type: Number
     Description: Memory size (in MB) allocated to the Lambda function.

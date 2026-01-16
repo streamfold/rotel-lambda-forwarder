@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - cf-arm64
 
 env:
   CARGO_TERM_COLOR: always
@@ -168,6 +169,7 @@ jobs:
           aws s3 cp ./dist/versioned/forwarder-clickhouse.yaml "${S3_PATH_BASE}/rotel-lambda-forwarder-clickhouse.yaml" --acl public-read
 
       - name: upload to S3 latest
+        if: github.ref_name == 'main'
         run: |
           S3_PATH_BASE="s3://${{ env.S3_BUCKET }}/stacks/latest/${{ matrix.arch }}"
 

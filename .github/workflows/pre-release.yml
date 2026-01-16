@@ -98,6 +98,7 @@ jobs:
           echo "Uploaded to $S3_PATH"
 
       - name: upload to S3 latest
+        if: github.ref_name == 'main'
         run: |
           S3_PATH="s3://${{ env.S3_BUCKET }}/rotel-lambda-forwarder/latest/${{ matrix.arch }}/rotel-lambda-forwarder.zip"
           aws s3 cp ./artifacts/bootstrap.zip "$S3_PATH" --acl public-read

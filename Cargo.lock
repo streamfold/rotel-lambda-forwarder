@@ -1843,7 +1843,7 @@ dependencies = [
 
 [[package]]
 name = "rotel-lambda-forwarder"
-version = "0.0.2"
+version = "0.0.4"
 dependencies = [
  "async-stream",
  "aws_lambda_events",

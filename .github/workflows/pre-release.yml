@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - cf-arm64
 
 env:
   CARGO_TERM_COLOR: always

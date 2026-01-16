@@ -9,31 +9,37 @@ use opentelemetry_proto::tonic::{
 };
 use tracing::debug;
 
-use crate::{aws_attributes::AwsAttributes, parse::record_parser::RecordParser};
+use crate::{aws_attributes::AwsAttributes, parse::record_parser::RecordParser, tags::TagManager};
 
 /// Parser handles the conversion of AWS CloudWatch Logs events into OpenTelemetry ResourceLogs
 pub struct Parser<'a> {
     aws_attributes: &'a AwsAttributes,
     request_id: &'a String,
+    tag_manager: &'a mut TagManager,
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(aws_attributes: &'a AwsAttributes, request_id: &'a String) -> Self {
+    pub fn new(
+        aws_attributes: &'a AwsAttributes,
+        request_id: &'a String,
+        tag_manager: &'a mut TagManager,
+    ) -> Self {
         Self {
             aws_attributes,
             request_id,
+            tag_manager,
         }
     }
 
     /// Parse an AWS CloudWatch Logs event and return ResourceLogs
-    pub fn parse(&self, logs_event: LogsEvent) -> Result<Vec<ResourceLogs>, ParserError> {
+    pub async fn parse(&mut self, logs_event: LogsEvent) -> Result<Vec<ResourceLogs>, ParserError> {
         debug!(
             request_id = %self.request_id,
             "Starting to parse CloudWatch Logs event"
         );
 
         // Parse the CloudWatch Logs event into ResourceLogs
-        let resource_logs = self.parse_logs_event(logs_event)?;
+        let resource_logs = self.parse_logs_event(logs_event).await?;
 
         debug!(
             request_id = %self.request_id,
@@ -45,7 +51,10 @@ impl<'a> Parser<'a> {
     }
 
     /// Internal method to parse the LogsEvent
-    fn parse_logs_event(&self, logs_event: LogsEvent) -> Result<Vec<ResourceLogs>, ParserError> {
+    async fn parse_logs_event(
+        &mut self,
+        logs_event: LogsEvent,
+    ) -> Result<Vec<ResourceLogs>, ParserError> {
         let mut resource_logs_list = Vec::new();
 
         debug!(
@@ -64,6 +73,25 @@ impl<'a> Parser<'a> {
         // Detect platform and parser type
         let (log_platform, parser_type) =
             detect_log_type(&log_data.log_group, &log_data.log_stream);
+
+        // Fetch tags for the log group
+        let log_group_tags = self
+            .tag_manager
+            .get_tags(
+                &log_data.log_group,
+                &self.aws_attributes.region,
+                &self.aws_attributes.account_id,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                debug!(
+                    request_id = %self.request_id,
+                    log_group = %log_data.log_group,
+                    error = %e,
+                    "Failed to fetch tags for log group"
+                );
+                std::collections::HashMap::new()
+            });
 
         // Build base attributes
         let mut attributes = vec![
@@ -105,6 +133,16 @@ impl<'a> Parser<'a> {
                 key: "cloud.platform".to_string(),
                 value: Some(AnyValue {
                     value: Some(Value::StringValue(log_platform.as_str().to_string())),
+                }),
+            });
+        }
+
+        // Add tags as resource attributes
+        for (tag_key, tag_value) in log_group_tags {
+            attributes.push(KeyValue {
+                key: format!("cloudwatch.log.tags.{}", tag_key),
+                value: Some(AnyValue {
+                    value: Some(Value::StringValue(tag_value)),
                 }),
             });
         }
@@ -254,15 +292,20 @@ mod tests {
     use aws_lambda_events::cloudwatch_logs::LogEntry;
 
     use super::*;
+    use aws_config::BehaviorVersion;
 
-    #[test]
-    fn test_parse_empty_event() {
+    #[tokio::test]
+    async fn test_parse_empty_event() {
         let logs_event = LogsEvent::default();
         let request_id = "test-request-id".to_string();
         let aws_attributes = AwsAttributes::default();
 
-        let parser = Parser::new(&aws_attributes, &request_id);
-        let result = parser.parse(logs_event);
+        let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
+        let cw_client = aws_sdk_cloudwatchlogs::Client::new(&config);
+        let mut tag_manager = crate::tags::TagManager::new(cw_client, None, None);
+
+        let mut parser = Parser::new(&aws_attributes, &request_id, &mut tag_manager);
+        let result = parser.parse(logs_event).await;
 
         assert!(result.is_ok());
         let resource_logs = result.unwrap();
@@ -270,8 +313,8 @@ mod tests {
         assert_eq!(resource_logs.len(), 1);
     }
 
-    #[test]
-    fn test_parse_eks_authenticator_log() {
+    #[tokio::test]
+    async fn test_parse_eks_authenticator_log() {
         let log_msg = r#"time="2025-12-24T19:48:32Z" level=info msg="access granted" arn="arn:aws:iam::927209226484:role/AWSWesleyClusterManagerLambda-Add-AddonManagerRole-1CRTQUJF13T5U" client="127.0.0.1:54812" groups="[]" method=POST path=/authenticate stsendpoint=sts.us-east-1.amazonaws.com uid="aws-iam-authenticator:927209226484:AROA5PYP2AD2FVXU23CA6" username="eks:addon-manager""#;
 
         // Test that EKS authenticator logs are detected as KeyValue parser type

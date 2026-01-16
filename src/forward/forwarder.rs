@@ -10,15 +10,19 @@ use crate::aws_attributes::AwsAttributes;
 use crate::events::{LambdaEvent, LambdaPayload};
 use crate::forward::{AckerBuilder, AckerWaiter};
 use crate::parse::cwlogs;
+use crate::tags::TagManager;
 
-#[derive(Clone)]
 pub struct Forwarder {
     logs_tx: BoundedSender<Message<ResourceLogs>>,
+    tag_manager: TagManager,
 }
 
 impl Forwarder {
-    pub fn new(logs_tx: BoundedSender<Message<ResourceLogs>>) -> Self {
-        Self { logs_tx }
+    pub fn new(logs_tx: BoundedSender<Message<ResourceLogs>>, tag_manager: TagManager) -> Self {
+        Self {
+            logs_tx,
+            tag_manager,
+        }
     }
 }
 
@@ -37,7 +41,7 @@ impl Forwarder {
     }
 
     async fn handle_aws_logs(
-        &self,
+        &mut self,
         logs_event: LogsEvent,
         aws_attributes: &AwsAttributes,
         context: &lambda_runtime::Context,
@@ -47,10 +51,11 @@ impl Forwarder {
             "Handling CloudWatch Logs event"
         );
 
-        let parser = cwlogs::Parser::new(aws_attributes, &context.request_id);
+        let mut parser =
+            cwlogs::Parser::new(aws_attributes, &context.request_id, &mut self.tag_manager);
 
         // Parse the logs
-        let resource_logs = match parser.parse(logs_event) {
+        let resource_logs = match parser.parse(logs_event).await {
             Ok(logs) => logs,
             Err(e) => {
                 error!(
@@ -98,12 +103,17 @@ impl Forwarder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aws_config::BehaviorVersion;
 
     #[tokio::test]
     async fn test_handle_aws_logs() {
         let (logs_tx, _logs_rx) = rotel::bounded_channel::bounded(10);
 
-        let forwarder = Forwarder::new(logs_tx);
+        let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
+        let cw_client = aws_sdk_cloudwatchlogs::Client::new(&config);
+        let tag_manager = TagManager::new(cw_client, None, None);
+
+        let mut forwarder = Forwarder::new(logs_tx, tag_manager);
         let logs_event = LogsEvent::default();
         let context = lambda_runtime::Context::default();
         let aws_attributes = AwsAttributes::new(&context);

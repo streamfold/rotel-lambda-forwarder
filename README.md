@@ -367,3 +367,13 @@ See [DEVELOPING](/DEVELOPING.md) for developer instructions.
 ---
 
 Built with ❤️ by Streamfold.
+
+## Releasing
+
+See [RELEASING.md](/RELEASING.md) for release process instructions.
+
+**Quick Start:**
+- **GitHub Actions (Recommended):** Go to [Actions → Bump Version](../../actions/workflows/bump-version.yml) and click "Run workflow"
+- **Local Script:** Run `./scripts/bump-version.sh --type patch --push --pull-request`
+
+After merging the version bump PR, a release tag is automatically created and the release workflow builds and publishes artifacts.

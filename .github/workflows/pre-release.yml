@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - log-group-tags
 
 env:
   CARGO_TERM_COLOR: always

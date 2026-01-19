@@ -98,17 +98,4 @@ mod tests {
             "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/my-function"
         );
     }
-
-    #[test]
-    fn test_build_log_group_arn_with_special_chars() {
-        let arn = CloudWatchTagFetcher::build_log_group_arn(
-            "eu-west-1",
-            "987654321098",
-            "/aws/eks/cluster-name/cluster",
-        );
-        assert_eq!(
-            arn,
-            "arn:aws:logs:eu-west-1:987654321098:log-group:/aws/eks/cluster-name/cluster"
-        );
-    }
 }

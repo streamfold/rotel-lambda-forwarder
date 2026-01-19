@@ -364,10 +364,6 @@ Want to chat about this project, share feedback, or suggest improvements? Join o
 
 See [DEVELOPING](/DEVELOPING.md) for developer instructions.
 
----
-
-Built with ❤️ by Streamfold.
-
 ## Releasing
 
 See [RELEASING.md](/RELEASING.md) for release process instructions.
@@ -379,3 +375,7 @@ After merging the version bump PR:
 1. Tag is automatically created (`auto-tag.yml`)
 2. GitHub release is created (`auto-release.yml`)
 3. Artifacts are built and uploaded (`release.yml`)
+
+---
+
+Built with ❤️ by Streamfold.

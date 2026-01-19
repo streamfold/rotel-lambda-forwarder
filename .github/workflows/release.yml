@@ -1,9 +1,8 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  release:
+    types: [created]
 
 env:
   CARGO_TERM_COLOR: always
@@ -92,7 +91,8 @@ jobs:
 
       - name: upload to S3 by version
         run: |
-          S3_PATH="s3://${{ env.S3_BUCKET }}/rotel-lambda-forwarder/${{ github.ref_name }}/${{ matrix.arch }}/rotel-lambda-forwarder.zip"
+          TAG_NAME="${{ github.event.release.tag_name }}"
+          S3_PATH="s3://${{ env.S3_BUCKET }}/rotel-lambda-forwarder/${TAG_NAME}/${{ matrix.arch }}/rotel-lambda-forwarder.zip"
           aws s3 cp ./artifacts/bootstrap.zip "$S3_PATH" --acl public-read
           echo "Uploaded to $S3_PATH"
 
@@ -123,12 +123,12 @@ jobs:
           path: ./artifacts
 
       - name: upload to GH release
-        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          id=$(gh api -H "Accept: application/vnd.github+json" /repos/${{ github.repository }}/releases/tags/${{ github.ref_name }} --jq .id)
-          curl --fail-with-body -sS  -X POST --data-binary @"./artifacts/bootstrap.zip" -H 'Content-Type: application/octet-stream' -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "https://uploads.github.com/repos/${{ github.repository }}/releases/$id/assets?name=rotel-lambda-forwarder-${{ github.ref_name }}_${{ matrix.arch }}.zip"
+          TAG_NAME="${{ github.event.release.tag_name }}"
+          gh release upload "$TAG_NAME" \
+            ./artifacts/bootstrap.zip#rotel-lambda-forwarder-${TAG_NAME}_${{ matrix.arch }}.zip
 
   upload-cloudformation:
     name: upload cloudformation - ${{ matrix.arch }}
@@ -174,12 +174,12 @@ jobs:
       - run: |
           yq '.Parameters.S3Bucket.Default = "${{ env.ARTIFACT_S3_BUCKET }}" |
             .Resources.ForwarderLambda.Properties.Architectures = ["${{ matrix.arch }}"] |
-            .Parameters.S3Key.Default = "rotel-lambda-forwarder/${{ github.ref_name }}/${{ matrix.arch }}/rotel-lambda-forwarder.zip"' \
+            .Parameters.S3Key.Default = "rotel-lambda-forwarder/${{ github.event.release.tag_name }}/${{ matrix.arch }}/rotel-lambda-forwarder.zip"' \
             ./cloudformation-stacks/forwarder-otlp.template.yaml > dist/versioned/forwarder-otlp.yaml
 
           yq '.Parameters.S3Bucket.Default = "${{ env.ARTIFACT_S3_BUCKET }}" |
             .Resources.ForwarderLambda.Properties.Architectures = ["${{ matrix.arch }}"] |
-            .Parameters.S3Key.Default = "rotel-lambda-forwarder/${{ github.ref_name }}/${{ matrix.arch }}/rotel-lambda-forwarder.zip"' \
+            .Parameters.S3Key.Default = "rotel-lambda-forwarder/${{ github.event.release.tag_name }}/${{ matrix.arch }}/rotel-lambda-forwarder.zip"' \
             ./cloudformation-stacks/forwarder-clickhouse.template.yaml > dist/versioned/forwarder-clickhouse.yaml
 
       - name: configure AWS credentials
@@ -190,7 +190,8 @@ jobs:
 
       - name: upload to S3 by version
         run: |
-          S3_PATH_BASE="s3://${{ env.S3_BUCKET }}/stacks/${{ github.ref_name }}/${{ matrix.arch }}"
+          TAG_NAME="${{ github.event.release.tag_name }}"
+          S3_PATH_BASE="s3://${{ env.S3_BUCKET }}/stacks/${TAG_NAME}/${{ matrix.arch }}"
 
           aws s3 cp ./dist/versioned/forwarder-otlp.yaml "${S3_PATH_BASE}/rotel-lambda-forwarder-otlp.yaml" --acl public-read
           aws s3 cp ./dist/versioned/forwarder-clickhouse.yaml "${S3_PATH_BASE}/rotel-lambda-forwarder-clickhouse.yaml" --acl public-read

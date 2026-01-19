@@ -19,6 +19,7 @@ use rotel_lambda_forwarder::{
     aws_attributes::AwsAttributes,
     forward::{self},
     init::{self, logging::LoggerGuard},
+    tags::TagManager,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{collections::HashMap, env, process::ExitCode, sync::Arc};
@@ -43,6 +44,10 @@ struct Arguments {
     #[arg(long, global = true, env = "ROTEL_ENVIRONMENT", default_value = "dev")]
     /// Environment
     environment: String,
+
+    #[arg(long, env = "FORWARDER_S3_BUCKET")]
+    /// S3 bucket for storing cache files
+    s3_bucket: Option<String>,
 
     #[command(flatten)]
     agent_args: Box<AgentRun>,
@@ -77,7 +82,13 @@ fn main() -> ExitCode {
         }
     };
 
-    match run_forwarder(start_time, guard, opt.agent_args, &opt.environment) {
+    match run_forwarder(
+        start_time,
+        guard,
+        opt.agent_args,
+        &opt.environment,
+        opt.s3_bucket,
+    ) {
         Ok(_) => {}
         Err(e) => {
             eprintln!("Failed to run agent: {}", e);
@@ -94,6 +105,7 @@ async fn run_forwarder(
     log_guard: LoggerGuard,
     mut agent_args: Box<AgentRun>,
     env: &str,
+    s3_bucket: Option<String>,
 ) -> Result<(), BoxError> {
     let (logs_tx, logs_rx) = rotel::bounded_channel::bounded(LOGS_QUEUE_SIZE);
 
@@ -145,7 +157,27 @@ async fn run_forwarder(
     };
 
     let mut flusher = forward::Flusher::new(flush_logs_tx, flush_pipeline_tx, flush_exporters_tx);
-    let mut forwarder = forward::Forwarder::new(logs_tx);
+
+    // Initialize TagManager
+    let aws_config = aws_config::load_from_env().await;
+    let cw_client = aws_sdk_cloudwatchlogs::Client::new(&aws_config);
+
+    let (s3_client, s3_bucket_name) = if let Some(bucket) = s3_bucket {
+        info!(bucket = %bucket, "Initializing tag manager with S3 cache");
+        (Some(aws_sdk_s3::Client::new(&aws_config)), Some(bucket))
+    } else {
+        (None, None)
+    };
+
+    let mut tag_manager = TagManager::new(cw_client, s3_client, s3_bucket_name);
+
+    // Load cache from S3 if available
+    if let Err(e) = tag_manager.initialize().await {
+        error!(error = %e, "Failed to initialize tag manager");
+        // Don't fail startup, just log the error
+    }
+
+    let mut forwarder = forward::Forwarder::new(logs_tx, tag_manager);
 
     init_wait_rx
         .await

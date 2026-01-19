@@ -107,6 +107,27 @@ Parameters:
     Description: S3 key for the Rotel Lambda Forwarder.
     Default: "" # updated on release
 Resources:
+  ForwarderBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub "rotel-lambda-forwarder-${AWS::StackName}-${AWS::AccountId}"
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldCacheFiles
+            Status: Enabled
+            ExpirationInDays: 7
+            Prefix: rotel-lambda-forwarder/cache/
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: "PartOf"
+          Value: !Ref AWS::StackName
+        - Key: "Platform"
+          Value: "Rotel"
   ForwarderLogGroup:
     Type: "AWS::Logs::LogGroup"
     DeletionPolicy: Delete
@@ -151,6 +172,19 @@ Resources:
               - lambda:RemovePermission
             Effect: Allow
             Resource: !GetAtt ForwarderLambda.Arn
+          - Action:
+              - logs:ListTagsForResource
+            Effect: Allow
+            Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+          - Action:
+              - s3:GetObject
+              - s3:PutObject
+            Effect: Allow
+            Resource: !Sub "arn:aws:s3:::${ForwarderBucket}/rotel-lambda-forwarder/*"
+          - Action:
+              - s3:ListBucket
+            Effect: Allow
+            Resource: !Sub "arn:aws:s3:::${ForwarderBucket}"
       PolicyName: !Sub "${AWS::StackName}-forwarder-lambda-policy"
       Roles:
         - !Ref "ForwarderRole"
@@ -190,6 +224,7 @@ Resources:
           ROTEL_CLICKHOUSE_EXPORTER_ENABLE_JSON: !Ref "ClickhouseEnableJson"
           ROTEL_OTEL_RESOURCE_ATTRIBUTES: !Ref "ResourceAttributes"
           ROTEL_EXPORTER_RETRY_MAX_ELAPSED_TIME: !Sub "${FunctionTimeout}s"
+          FORWARDER_S3_BUCKET: !Ref ForwarderBucket
   ForwarderLambdaPermission:
     Type: AWS::Lambda::Permission
     DependsOn:
@@ -207,6 +242,9 @@ Outputs:
   ForwarderLambdaName:
     Description: The name of the created Forwarder Lambda
     Value: !Ref ForwarderLambda
+  ForwarderBucketName:
+    Description: The name of the S3 bucket used for tag caching
+    Value: !Ref ForwarderBucket
   SetupInstructions:
     Description: Instructions for setting up CloudWatch Logs subscription filters
     Value: !Sub |

@@ -3,3 +3,4 @@ pub mod events;
 pub mod forward;
 pub mod init;
 pub mod parse;
+pub mod tags;

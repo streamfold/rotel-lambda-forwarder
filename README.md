@@ -6,9 +6,9 @@ An AWS Lambda function written in Rust that forwards CloudWatch Logs to OpenTele
 
 - **OpenTelemetry Native**: Transforms all logs to OpenTelemetry format
 - **Multiple Export Targets**: Supports OTLP HTTP/gRPC and other exporters via Rotel
-- **Automatic JSON parsing**: Will automatically parse JSON log lines if detected
+- **Automatic parsing**: Support for JSON and key=value parsing, with automatic detection
 - **Log stream parser mapping**: Pre-built parser rules for known AWS CW log groups/streams
-- **AWS Resource Attributes**: Automatically enriches logs with AWS Lambda and CloudWatch metadata
+- **AWS Resource Attributes**: Automatically enriches logs with AWS Lambda and CloudWatch log group tags
 - **Reliable delivery**: Ensures logs are delivered successfully before acknowledging request
 
 ## Supported services
@@ -103,6 +103,52 @@ aws iam attach-role-policy \
 
 If your function needs additional AWS service access (e.g., S3, DynamoDB), attach those policies as well.
 
+**Required Permissions for Log Group Tag Enrichment**
+
+The Lambda function needs permissions to:
+1. List tags on CloudWatch Logs log groups
+2. Read and write to the S3 bucket for cache persistence
+
+Create and attach a custom policy for tag caching:
+
+```bash
+aws iam create-policy \
+  --policy-name rotel-lambda-forwarder-tags-policy \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Action": [
+          "logs:ListTagsForResource"
+        ],
+        "Resource": "arn:aws:logs:*:*:log-group:*"
+      },
+      {
+        "Effect": "Allow",
+        "Action": [
+          "s3:GetObject",
+          "s3:PutObject"
+        ],
+        "Resource": "arn:aws:s3:::YOUR_BUCKET_NAME/rotel-lambda-forwarder/cache/log-groups/*"
+      },
+      {
+        "Effect": "Allow",
+        "Action": [
+          "s3:ListBucket"
+        ],
+        "Resource": "arn:aws:s3:::YOUR_BUCKET_NAME"
+      }
+    ]
+  }'
+
+aws iam attach-role-policy \
+  --role-name rotel-lambda-forwarder-role \
+  --policy-arn arn:aws:iam::YOUR_ACCOUNT_ID:policy/rotel-lambda-forwarder-tags-policy
+```
+
+Replace `YOUR_BUCKET_NAME` with your S3 bucket name and `YOUR_ACCOUNT_ID` with your AWS account ID.
+
 Note the role ARN from the output for the next step.
 
 #### 2. Create the Lambda Function
@@ -122,6 +168,7 @@ aws lambda create-function \
   --region REGION \
   --environment Variables="{
     ROTEL_OTLP_EXPORTER_ENDPOINT=https://your-otlp-endpoint.com,
+    FORWARDER_S3_BUCKET=your-cache-bucket-name
   }"
 ```
 
@@ -153,8 +200,42 @@ aws lambda update-function-configuration \
   --function-name rotel-lambda-forwarder \
   --environment Variables="{
     ROTEL_OTLP_EXPORTER_ENDPOINT=https://your-otlp-endpoint.com,
+    FORWARDER_S3_BUCKET=your-cache-bucket-name
   }"
 ```
+
+## Log Group Tag Caching
+
+The Lambda forwarder automatically retrieves and caches tags associated with CloudWatch log groups. Tags are added as resource attributes in the format `cloudwatch.log.tags.<tag-key>`.
+
+**Note:** When deploying via CloudFormation, an S3 bucket for tag caching is automatically created with the name `rotel-lambda-forwarder-<stack-name>-<account-id>`. For manual deployments, you need to create an S3 bucket and set the `FORWARDER_S3_BUCKET` environment variable.
+
+### How It Works
+
+1. **First Request**: When logs are received from a log group for the first time, the forwarder calls the CloudWatch Logs `ListTagsForResource` API to fetch tags.
+2. **Caching**: Tags are cached in memory with a 15-minute TTL (from the time they were fetched) to avoid repeated API calls.
+3. **S3 Persistence**: If configured with an S3 bucket, the tag cache is persisted to S3 for durability across Lambda cold starts.
+4. **Automatic Updates**: The cache is automatically updated when new log groups are encountered or when cached entries expire.
+
+### Configuration
+
+**CloudFormation Deployments:** The S3 bucket is automatically created and configured.
+
+**Manual Deployments:** Set the `FORWARDER_S3_BUCKET` environment variable:
+
+```bash
+FORWARDER_S3_BUCKET=your-cache-bucket-name
+```
+
+The cache file is stored at: `s3://<bucket>/rotel-lambda-forwarder/cache/log-groups/tags.json.gz`
+
+**Note**: If you don't need tag enrichment, you can omit the `logs:ListTagsForResource` permission from the Lambda's IAM role. A circuit breaker will activate on the first log batch and the forwarder will continue processing logs without tags.
+
+### Example
+
+If a log group has tags `env=production` and `team=platform`, the resource attributes will include:
+- `cloudwatch.log.tags.env` = `production`
+- `cloudwatch.log.tags.team` = `platform`
 
 ## Attribute mapping
 

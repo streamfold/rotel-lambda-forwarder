@@ -31,7 +31,7 @@ tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 tower = { version = "0.5.2", features = ["retry", "timeout"] }
 dotenvy = { git = "https://github.com/streamfold/dotenvy", branch = "custom-substitution" }
-rotel = { git = "https://github.com/streamfold/rotel", rev = "acf0afd00a0b990a760759cdf6f84668627ad0a4", default-features = false}
+rotel = { git = "https://github.com/streamfold/rotel", rev = "v0.1.3", default-features = false}
 #rotel = { path = "../rotel", default-features = false}
 lambda-extension = "1.0.1"
 opentelemetry-proto = "0.30.0"

@@ -71,7 +71,7 @@ jobs:
           cat > release_notes.md << EOF
           ## Release $VERSION
 
-          **Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${TAG_NAME}
+          **Full Changelog**: [${PREV_TAG}...${TAG_NAME}](https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${TAG_NAME})
 
           ### Artifacts
 

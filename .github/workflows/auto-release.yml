@@ -105,7 +105,7 @@ jobs:
           VERSION="${{ steps.validate.outputs.version }}"
 
           gh release create "$TAG_NAME" \
-            --title "$VERSION" \
+            --title "$TAG_NAME" \
             --notes-file "${{ steps.release_notes.outputs.release_notes_file }}" \
             --draft=false \
             --prerelease=false

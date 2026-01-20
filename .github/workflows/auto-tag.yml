@@ -86,6 +86,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Clear git credentials
+        if: steps.check.outputs.is_version_bump == 'true' && steps.check_label.outputs.skip_tag == 'false'
         run: |
           git config --unset-all http.https://github.com/.extraheader || true
           git config --global --unset-all credential.helper || true

@@ -2598,7 +2598,7 @@ dependencies = [
 
 [[package]]
 name = "rotel-lambda-forwarder"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "async-stream",
  "aws-config",

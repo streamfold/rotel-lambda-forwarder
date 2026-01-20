@@ -11,6 +11,11 @@ The release process has been streamlined with automation to reduce manual steps.
 
 ## Option 1: GitHub Actions (Recommended)
 
+**NOTE**: This automation requires a Personal Access Token, defined in the secret `PAT_RELEASE_ENGINEER`, with the following permissions:
+- Contents: read/write
+- Metadata: read
+- Pull requests: read/write
+
 ### Step 1: Trigger Version Bump Workflow
 
 1. Go to the [Actions tab](../../actions/workflows/bump-version.yml) in GitHub

@@ -162,12 +162,19 @@ async fn run_forwarder(
     let aws_config = aws_config::load_from_env().await;
     let cw_client = aws_sdk_cloudwatchlogs::Client::new(&aws_config);
 
-    let (s3_client, s3_bucket_name) = if let Some(bucket) = s3_bucket {
-        info!(bucket = %bucket, "Initializing tag manager with S3 cache");
-        (Some(aws_sdk_s3::Client::new(&aws_config)), Some(bucket))
-    } else {
-        (None, None)
-    };
+    let (s3_client, s3_client_clone, s3_bucket_name, s3_bucket_clone) =
+        if let Some(bucket) = s3_bucket {
+            info!(bucket = %bucket, "Initializing managers with S3 cache");
+            let s3_client = aws_sdk_s3::Client::new(&aws_config);
+            (
+                Some(s3_client.clone()),
+                Some(s3_client),
+                Some(bucket.clone()),
+                Some(bucket),
+            )
+        } else {
+            (None, None, None, None)
+        };
 
     let mut tag_manager = TagManager::new(cw_client, s3_client, s3_bucket_name);
 
@@ -177,7 +184,21 @@ async fn run_forwarder(
         // Don't fail startup, just log the error
     }
 
-    let mut forwarder = forward::Forwarder::new(logs_tx, tag_manager);
+    // Initialize FlowLogManager
+    let ec2_client = aws_sdk_ec2::Client::new(&aws_config);
+    let mut flow_log_manager = rotel_lambda_forwarder::flowlogs::FlowLogManager::new(
+        ec2_client,
+        s3_client_clone,
+        s3_bucket_clone,
+    );
+
+    // Initialize flow log manager (fetch from EC2 and load from S3)
+    if let Err(e) = flow_log_manager.initialize().await {
+        error!(error = %e, "Failed to initialize flow log manager");
+        // Don't fail startup, just log the error
+    }
+
+    let mut forwarder = forward::Forwarder::new(logs_tx, tag_manager, flow_log_manager);
 
     init_wait_rx
         .await

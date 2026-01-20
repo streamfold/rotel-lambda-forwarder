@@ -176,6 +176,11 @@ Resources:
               - logs:ListTagsForResource
             Effect: Allow
             Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+          # Allow querying EC2 Flow Log configurations for dynamic parsing and tag extraction
+          - Action:
+              - ec2:DescribeFlowLogs
+            Effect: Allow
+            Resource: "*"
           - Action:
               - s3:GetObject
               - s3:PutObject

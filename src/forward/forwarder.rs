@@ -8,6 +8,7 @@ use tracing::{debug, error};
 
 use crate::aws_attributes::AwsAttributes;
 use crate::events::{LambdaEvent, LambdaPayload};
+use crate::flowlogs::FlowLogManager;
 use crate::forward::{AckerBuilder, AckerWaiter};
 use crate::parse::cwlogs;
 use crate::tags::TagManager;
@@ -15,13 +16,19 @@ use crate::tags::TagManager;
 pub struct Forwarder {
     logs_tx: BoundedSender<Message<ResourceLogs>>,
     tag_manager: TagManager,
+    flow_log_manager: FlowLogManager,
 }
 
 impl Forwarder {
-    pub fn new(logs_tx: BoundedSender<Message<ResourceLogs>>, tag_manager: TagManager) -> Self {
+    pub fn new(
+        logs_tx: BoundedSender<Message<ResourceLogs>>,
+        tag_manager: TagManager,
+        flow_log_manager: FlowLogManager,
+    ) -> Self {
         Self {
             logs_tx,
             tag_manager,
+            flow_log_manager,
         }
     }
 }
@@ -51,8 +58,12 @@ impl Forwarder {
             "Handling CloudWatch Logs event"
         );
 
-        let mut parser =
-            cwlogs::Parser::new(aws_attributes, &context.request_id, &mut self.tag_manager);
+        let mut parser = cwlogs::Parser::new(
+            aws_attributes,
+            &context.request_id,
+            &mut self.tag_manager,
+            &mut self.flow_log_manager,
+        );
 
         // Parse the logs
         let resource_logs = match parser.parse(logs_event).await {
@@ -113,7 +124,10 @@ mod tests {
         let cw_client = aws_sdk_cloudwatchlogs::Client::new(&config);
         let tag_manager = TagManager::new(cw_client, None, None);
 
-        let mut forwarder = Forwarder::new(logs_tx, tag_manager);
+        let ec2_client = aws_sdk_ec2::Client::new(&config);
+        let flow_log_manager = FlowLogManager::new(ec2_client, None, None);
+
+        let mut forwarder = Forwarder::new(logs_tx, tag_manager, flow_log_manager);
         let logs_event = LogsEvent::default();
         let context = lambda_runtime::Context::default();
         let aws_attributes = AwsAttributes::new(&context);

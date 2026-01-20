@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use aws_lambda_events::cloudwatch_logs::LogEntry;
 use opentelemetry_proto::tonic::{
@@ -9,11 +9,13 @@ use regex::Regex;
 use serde_json::Value as JsonValue;
 use tracing::{debug, warn};
 
+use crate::flowlogs::ParsedFields;
 use crate::parse::{
     cwlogs::{LogPlatform, ParserError, ParserType},
     field_stripper::FieldStripper,
     json::{json_value_to_any_value, parse_json_to_map},
     keyvalue::parse_keyvalue_to_map,
+    vpclog::parse_vpclog_to_map,
 };
 
 /// Parser for CloudWatch log entries that converts them into OpenTelemetry LogRecords.
@@ -24,17 +26,24 @@ pub(crate) struct RecordParser {
     platform: LogPlatform,
     parser_type: ParserType,
     field_stripper: FieldStripper,
+    flow_log_parsed_fields: Option<Arc<ParsedFields>>,
 }
 
+#[derive(Debug)]
 pub(crate) struct RecordParserError(pub(crate) ParserError, pub(crate) String);
 
 impl RecordParser {
     /// Create a new RecordParser for a specific platform and parser type.
-    pub(crate) fn new(platform: LogPlatform, parser_type: ParserType) -> Self {
+    pub(crate) fn new(
+        platform: LogPlatform,
+        parser_type: ParserType,
+        flow_log_parsed_fields: Option<Arc<ParsedFields>>,
+    ) -> Self {
         Self {
             platform,
             parser_type,
             field_stripper: FieldStripper::new(platform),
+            flow_log_parsed_fields,
         }
     }
 
@@ -60,6 +69,17 @@ impl RecordParser {
         let json_map = match self.parser_type {
             ParserType::Json => parse_json_to_map(message).map(|r| Some(r)),
             ParserType::KeyValue => parse_keyvalue_to_map(message).map(|r| Some(r)),
+            ParserType::VpcLog => match self.flow_log_parsed_fields.as_ref() {
+                Some(parsed_fields) => {
+                    parse_vpclog_to_map(message, parsed_fields.clone()).map(|r| Some(r))
+                }
+                None => {
+                    lr.body = Some(AnyValue {
+                        value: Some(Value::StringValue(message)),
+                    });
+                    Ok(None)
+                }
+            },
             ParserType::Unknown => {
                 // Auto-detect: try JSON first, otherwise try keyvalue, otherwise plain text
                 if message.len() > 2 && message.starts_with("{") {
@@ -304,7 +324,7 @@ mod tests {
     /// Test utility: Parse a log message and return the LogRecord
     fn parse_log_msg(message: &str, platform: LogPlatform, parser_type: ParserType) -> LogRecord {
         let log_entry = create_log_entry(message);
-        let parser = RecordParser::new(platform, parser_type);
+        let parser = RecordParser::new(platform, parser_type, None);
         parser.parse(123456789, log_entry)
     }
 

@@ -126,9 +126,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG_NAME="${{ github.event.release.tag_name }}"
-          gh release upload "$TAG_NAME" \
-            ./artifacts/bootstrap.zip#rotel-lambda-forwarder-${TAG_NAME}_${{ matrix.arch }}.zip
+          id=$(gh api -H "Accept: application/vnd.github+json" /repos/${{ github.repository }}/releases/tags/${{ github.event.release.tag_name }} --jq .id)
+          curl --fail-with-body -sS  -X POST --data-binary @"./artifacts/bootstrap.zip" -H 'Content-Type: application/octet-stream' -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "https://uploads.github.com/repos/${{ github.repository }}/releases/$id/assets?name=rotel-lambda-forwarder-${{ github.event.release.tag_name }}_${{ matrix.arch }}.zip"
 
   upload-cloudformation:
     name: upload cloudformation - ${{ matrix.arch }}

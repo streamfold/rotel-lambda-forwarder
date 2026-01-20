@@ -14,12 +14,13 @@ The release process has been streamlined with automation to reduce manual steps.
 ### Step 1: Trigger Version Bump Workflow
 
 1. Go to the [Actions tab](../../actions/workflows/bump-version.yml) in GitHub
-2. Click "Run workflow"
-3. Select the version bump type:
+2. Click on "Bump Version".
+3. Click "Run workflow"
+4. Select the version bump type:
    - `patch` - Bug fixes (0.0.4 → 0.0.5)
    - `minor` - New features (0.0.4 → 0.1.0)
    - `major` - Breaking changes (0.0.4 → 1.0.0)
-4. Click "Run workflow"
+5. Click "Run workflow"
 
 This will:
 - ✅ Read the current version from `Cargo.toml`

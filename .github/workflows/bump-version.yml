@@ -87,8 +87,8 @@ jobs:
           sed -i 's/^version = ".*"/version = "${{ steps.version.outputs.new }}"/' Cargo.toml
           echo "Updated Cargo.toml to version ${{ steps.version.outputs.new }}"
 
-      - name: Run cargo build to update Cargo.lock
-        run: cargo build
+      - name: Run cargo check to update Cargo.lock
+        run: cargo check
 
       - name: Commit and push changes
         run: |
@@ -98,7 +98,7 @@ jobs:
 
       - name: Create Pull Request
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAT_OPEN_PR }}
         run: |
           gh pr create \
             --title "Release: Bump version to ${{ steps.version.outputs.new }}" \

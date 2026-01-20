@@ -121,14 +121,6 @@ jobs:
           - \`rotel-lambda-forwarder-${TAG_NAME}_x86_64.zip\` - x86_64 architecture
           - \`rotel-lambda-forwarder-${TAG_NAME}_arm64.zip\` - ARM64 architecture
 
-          ### CloudFormation Templates
-
-          CloudFormation templates are available in S3:
-          - \`s3://rotel-cloudformation/stacks/${TAG_NAME}/x86_64/rotel-lambda-forwarder-otlp.yaml\`
-          - \`s3://rotel-cloudformation/stacks/${TAG_NAME}/x86_64/rotel-lambda-forwarder-clickhouse.yaml\`
-          - \`s3://rotel-cloudformation/stacks/${TAG_NAME}/arm64/rotel-lambda-forwarder-otlp.yaml\`
-          - \`s3://rotel-cloudformation/stacks/${TAG_NAME}/arm64/rotel-lambda-forwarder-clickhouse.yaml\`
-
           ### Installation
 
           Download the appropriate architecture zip file and deploy using AWS Lambda.

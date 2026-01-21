@@ -263,12 +263,6 @@ impl CacheSnapshot {
     }
 }
 
-// impl Default for FlowLogCache {
-//     fn default() -> Self {
-//         Self::new()
-//     }
-// }
-
 #[cfg(test)]
 mod tests {
     use super::*;

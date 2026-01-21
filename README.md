@@ -24,6 +24,7 @@ expand as we verify support for additional services.
 | CloudTrail Logs        | CloudWatch   |
 | EKS Control Plane Logs | CloudWatch   |
 | Lambda Logs            | CloudWatch   |
+| VPC Flow Logs          | CloudWatch   |
 
 ## Deploying
 
@@ -101,19 +102,18 @@ aws iam attach-role-policy \
   --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
 ```
 
-If your function needs additional AWS service access (e.g., S3, DynamoDB), attach those policies as well.
-
-**Required Permissions for Log Group Tag Enrichment**
+**Additional Required Permissions**
 
 The Lambda function needs permissions to:
 1. List tags on CloudWatch Logs log groups
-2. Read and write to the S3 bucket for cache persistence
+2. Describe VPC flow logs
+3. Read and write to the S3 bucket for cache persistence
 
-Create and attach a custom policy for tag caching:
+Create and attach a custom policy:
 
 ```bash
 aws iam create-policy \
-  --policy-name rotel-lambda-forwarder-tags-policy \
+  --policy-name rotel-lambda-forwarder-policy \
   --policy-document '{
     "Version": "2012-10-17",
     "Statement": [
@@ -127,10 +127,17 @@ aws iam create-policy \
       {
         "Effect": "Allow",
         "Action": [
+          "ec2:DescribeFlowLogs"
+        ],
+        "Resource": "*"
+      },
+      {
+        "Effect": "Allow",
+        "Action": [
           "s3:GetObject",
           "s3:PutObject"
         ],
-        "Resource": "arn:aws:s3:::YOUR_BUCKET_NAME/rotel-lambda-forwarder/cache/log-groups/*"
+        "Resource": "arn:aws:s3:::YOUR_BUCKET_NAME/rotel-lambda-forwarder/*"
       },
       {
         "Effect": "Allow",
@@ -144,7 +151,7 @@ aws iam create-policy \
 
 aws iam attach-role-policy \
   --role-name rotel-lambda-forwarder-role \
-  --policy-arn arn:aws:iam::YOUR_ACCOUNT_ID:policy/rotel-lambda-forwarder-tags-policy
+  --policy-arn arn:aws:iam::YOUR_ACCOUNT_ID:policy/rotel-lambda-forwarder-policy
 ```
 
 Replace `YOUR_BUCKET_NAME` with your S3 bucket name and `YOUR_ACCOUNT_ID` with your AWS account ID.
@@ -281,6 +288,32 @@ from. We plan to make this configurable in the future.
 ### EKS
 
 * Strips `responseElements.credentials.sessionToken`
+
+## VPC Flow Logs
+
+The forwarder includes comprehensive support for AWS VPC Flow Logs with the following features:
+
+### Automatic Format Detection
+
+- **Dynamic Configuration**: Automatically fetches and caches flow log configurations from the EC2 API
+- **Custom Formats**: Supports custom log formats defined in your VPC Flow Log configuration
+- **Format Caching**: Caches parsed format configurations with a 30-minute TTL to minimize API calls
+- **S3 Persistence**: Flow log configurations are persisted to S3 for durability across Lambda cold starts
+
+### Typed Field Parsing
+
+VPC Flow Log fields are parsed according to their AWS-defined data types per the [docs](https://docs.aws.amazon.com/vpc/latest/userguide/flow-log-records.html).
+
+### Configuration
+
+VPC Flow Logs are automatically detected when the log group name matches the pattern for VPC Flow Logs. No additional configuration is required.
+
+**Note:** The Lambda function requires the following IAM permissions to fetch flow log configurations: `ec2:DescribeFlowLogs`.
+
+These permissions are included in the CloudFormation templates by default.
+
+**Note:** Flow logs should be sent to unique CloudWatch Log Groups. If multiple flow logs are exported to the
+same log group then the Lambda Forwarder will be unable to parse the fields correctly.
 
 ## Configuration
 

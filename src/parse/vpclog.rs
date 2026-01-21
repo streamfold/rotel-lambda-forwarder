@@ -111,7 +111,11 @@ mod tests {
     fn parse_log_msg(message: &str) -> LogRecord {
         let log_entry = create_log_entry(message);
         let dflt_fields = parse_log_format(DEFAULT_FORMAT);
-        let parser = RecordParser::new(LogPlatform::Unknown, ParserType::VpcLog, Some(Arc::new(ParsedFields::Success(dflt_fields))));
+        let parser = RecordParser::new(
+            LogPlatform::Unknown,
+            ParserType::VpcLog,
+            Some(Arc::new(ParsedFields::Success(dflt_fields))),
+        );
         parser.parse(123456789, log_entry)
     }
 
@@ -160,7 +164,7 @@ mod tests {
         assert_eq!(map.len(), 14); // All fields present
         assert_eq!(
             map.get("version").unwrap(),
-            &JsonValue::String("2".to_string())
+            &JsonValue::Number(serde_json::Number::from(2))
         );
         assert_eq!(
             map.get("account-id").unwrap(),
@@ -180,31 +184,31 @@ mod tests {
         );
         assert_eq!(
             map.get("srcport").unwrap(),
-            &JsonValue::String("20641".to_string())
+            &JsonValue::Number(serde_json::Number::from(20641))
         );
         assert_eq!(
             map.get("dstport").unwrap(),
-            &JsonValue::String("22".to_string())
+            &JsonValue::Number(serde_json::Number::from(22))
         );
         assert_eq!(
             map.get("protocol").unwrap(),
-            &JsonValue::String("6".to_string())
+            &JsonValue::Number(serde_json::Number::from(6))
         );
         assert_eq!(
             map.get("packets").unwrap(),
-            &JsonValue::String("20".to_string())
+            &JsonValue::Number(serde_json::Number::from(20))
         );
         assert_eq!(
             map.get("bytes").unwrap(),
-            &JsonValue::String("4249".to_string())
+            &JsonValue::Number(serde_json::Number::from(4249))
         );
         assert_eq!(
             map.get("start").unwrap(),
-            &JsonValue::String("1418530010".to_string())
+            &JsonValue::Number(serde_json::Number::from(1418530010i64))
         );
         assert_eq!(
             map.get("end").unwrap(),
-            &JsonValue::String("1418530070".to_string())
+            &JsonValue::Number(serde_json::Number::from(1418530070i64))
         );
         assert_eq!(
             map.get("action").unwrap(),
@@ -232,7 +236,7 @@ mod tests {
         assert_eq!(map.len(), 4);
         assert_eq!(
             map.get("version").unwrap(),
-            &JsonValue::String("2".to_string())
+            &JsonValue::Number(serde_json::Number::from(2))
         );
         assert_eq!(
             map.get("account-id").unwrap(),
@@ -264,7 +268,7 @@ mod tests {
         assert_eq!(map.len(), 3); // srcaddr should be excluded
         assert_eq!(
             map.get("version").unwrap(),
-            &JsonValue::String("2".to_string())
+            &JsonValue::Number(serde_json::Number::from(2))
         );
         assert_eq!(
             map.get("account-id").unwrap(),
@@ -291,11 +295,11 @@ mod tests {
         );
         assert_eq!(
             map.get("srcport").unwrap(),
-            &JsonValue::String("49761".to_string())
+            &JsonValue::Number(serde_json::Number::from(49761))
         );
         assert_eq!(
             map.get("dstport").unwrap(),
-            &JsonValue::String("3389".to_string())
+            &JsonValue::Number(serde_json::Number::from(3389))
         );
     }
 
@@ -312,7 +316,7 @@ mod tests {
         assert_eq!(map.len(), 6);
         assert_eq!(
             map.get("version").unwrap(),
-            &JsonValue::String("2".to_string())
+            &JsonValue::Number(serde_json::Number::from(2))
         );
         assert_eq!(
             map.get("account-id").unwrap(),
@@ -324,11 +328,11 @@ mod tests {
         );
         assert_eq!(
             map.get("start").unwrap(),
-            &JsonValue::String("1431280876".to_string())
+            &JsonValue::Number(serde_json::Number::from(1431280876i64))
         );
         assert_eq!(
             map.get("end").unwrap(),
-            &JsonValue::String("1431280934".to_string())
+            &JsonValue::Number(serde_json::Number::from(1431280934i64))
         );
 
         // Dash fields should not be present
@@ -351,15 +355,15 @@ mod tests {
 
         assert_eq!(
             map.get("protocol").unwrap(),
-            &JsonValue::String("1".to_string())
+            &JsonValue::Number(serde_json::Number::from(1))
         ); // ICMP
         assert_eq!(
             map.get("srcport").unwrap(),
-            &JsonValue::String("0".to_string())
+            &JsonValue::Number(serde_json::Number::from(0))
         );
         assert_eq!(
             map.get("dstport").unwrap(),
-            &JsonValue::String("0".to_string())
+            &JsonValue::Number(serde_json::Number::from(0))
         );
         assert_eq!(
             map.get("srcaddr").unwrap(),
@@ -385,15 +389,15 @@ mod tests {
         );
         assert_eq!(
             map.get("srcport").unwrap(),
-            &JsonValue::String("34892".to_string())
+            &JsonValue::Number(serde_json::Number::from(34892))
         );
         assert_eq!(
             map.get("dstport").unwrap(),
-            &JsonValue::String("22".to_string())
+            &JsonValue::Number(serde_json::Number::from(22))
         );
         assert_eq!(
             map.get("protocol").unwrap(),
-            &JsonValue::String("6".to_string())
+            &JsonValue::Number(serde_json::Number::from(6))
         );
     }
 
@@ -454,8 +458,8 @@ mod tests {
         }
 
         if let Some(Some(any_val)) = attrs.get("protocol") {
-            if let Some(Value::StringValue(s)) = &any_val.value {
-                assert_eq!(s, "6"); // TCP
+            if let Some(Value::IntValue(i)) = &any_val.value {
+                assert_eq!(*i, 6); // TCP
             }
         }
     }
@@ -522,14 +526,14 @@ mod tests {
             .collect();
 
         if let Some(Some(any_val)) = attrs.get("protocol") {
-            if let Some(Value::StringValue(s)) = &any_val.value {
-                assert_eq!(s, "1"); // ICMP
+            if let Some(Value::IntValue(i)) = &any_val.value {
+                assert_eq!(*i, 1); // ICMP
             }
         }
 
         if let Some(Some(any_val)) = attrs.get("srcport") {
-            if let Some(Value::StringValue(s)) = &any_val.value {
-                assert_eq!(s, "0");
+            if let Some(Value::IntValue(i)) = &any_val.value {
+                assert_eq!(*i, 0);
             }
         }
     }
@@ -569,16 +573,16 @@ mod tests {
             .map(|kv| (kv.key.as_str(), kv.value.as_ref()))
             .collect();
 
-        // Check that start and end timestamps are present
+        // Check that start and end timestamps are present (Int64)
         if let Some(Some(any_val)) = attrs.get("start") {
-            if let Some(Value::StringValue(s)) = &any_val.value {
-                assert_eq!(s, "1418530010");
+            if let Some(Value::IntValue(i)) = &any_val.value {
+                assert_eq!(*i, 1418530010);
             }
         }
 
         if let Some(Some(any_val)) = attrs.get("end") {
-            if let Some(Value::StringValue(s)) = &any_val.value {
-                assert_eq!(s, "1418530070");
+            if let Some(Value::IntValue(i)) = &any_val.value {
+                assert_eq!(*i, 1418530070);
             }
         }
     }
@@ -604,6 +608,46 @@ mod tests {
                 "No attributes parsed for: {}",
                 example
             );
+        }
+    }
+
+    #[test]
+    fn test_parse_vpclog_to_map_invalid_int32() {
+        // Test parsing a field that should be Int32 but contains non-integer data
+        let log_format = "${version} ${account-id} ${srcport} ${dstport}";
+        let input = "2 123456789010 invalid-port 22";
+        let parsed_fields = parse_log_format(log_format);
+        let result = parse_vpclog_to_map(
+            input.to_string(),
+            Arc::new(ParsedFields::Success(parsed_fields)),
+        );
+
+        // Should return an error because srcport (Int32) cannot parse "invalid-port"
+        assert!(result.is_err());
+        if let Err(e) = result {
+            let error_msg = format!("{:?}", e);
+            assert!(error_msg.contains("srcport"));
+            assert!(error_msg.contains("integer"));
+        }
+    }
+
+    #[test]
+    fn test_parse_vpclog_to_map_invalid_int64() {
+        // Test parsing an Int64 field with non-integer data
+        let log_format = "${version} ${account-id} ${bytes} ${packets}";
+        let input = "2 123456789010 not-a-number 100";
+        let parsed_fields = parse_log_format(log_format);
+        let result = parse_vpclog_to_map(
+            input.to_string(),
+            Arc::new(ParsedFields::Success(parsed_fields)),
+        );
+
+        // Should return an error because bytes (Int64) cannot parse "not-a-number"
+        assert!(result.is_err());
+        if let Err(e) = result {
+            let error_msg = format!("{:?}", e);
+            assert!(error_msg.contains("bytes"));
+            assert!(error_msg.contains("integer"));
         }
     }
 }

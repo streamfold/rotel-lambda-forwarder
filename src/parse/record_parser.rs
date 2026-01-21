@@ -69,17 +69,19 @@ impl RecordParser {
         let json_map = match self.parser_type {
             ParserType::Json => parse_json_to_map(message).map(|r| Some(r)),
             ParserType::KeyValue => parse_keyvalue_to_map(message).map(|r| Some(r)),
-            ParserType::VpcLog => match self.flow_log_parsed_fields.as_ref() {
-                Some(parsed_fields) => {
-                    parse_vpclog_to_map(message, parsed_fields.clone()).map(|r| Some(r))
+            ParserType::VpcLog => {
+                // Always keep log in Body
+                lr.body = Some(AnyValue {
+                    value: Some(Value::StringValue(message.clone())),
+                });
+
+                match self.flow_log_parsed_fields.as_ref() {
+                    Some(parsed_fields) => {
+                        parse_vpclog_to_map(message, parsed_fields.clone()).map(|r| Some(r))
+                    }
+                    None => Ok(None),
                 }
-                None => {
-                    lr.body = Some(AnyValue {
-                        value: Some(Value::StringValue(message)),
-                    });
-                    Ok(None)
-                }
-            },
+            }
             ParserType::Unknown => {
                 // Auto-detect: try JSON first, otherwise try keyvalue, otherwise plain text
                 if message.len() > 2 && message.starts_with("{") {

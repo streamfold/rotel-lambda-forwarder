@@ -4,7 +4,6 @@ use std::sync::{Arc, LazyLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, trace};
 
-/// Maximum age for cached entries (30 minutes in seconds)
 const MAX_CACHE_AGE_SECS: u64 = 30 * 60;
 
 /// Data type for a flow log field, based on Parquet data types from AWS documentation
@@ -15,17 +14,14 @@ pub enum ParsedFieldType {
     Int64,
 }
 
-/// A parsed field from a flow log format string with its name and type
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedField {
     /// The field name (e.g., "version", "account-id")
     pub field_name: String,
-    /// The data type of this field
     pub field_type: ParsedFieldType,
 }
 
 impl ParsedField {
-    /// Create a new ParsedField
     pub fn new(field_name: String, field_type: ParsedFieldType) -> Self {
         Self {
             field_name,
@@ -86,10 +82,9 @@ pub struct FlowLogConfig {
     pub log_format: String,
     /// The destination type (e.g., "cloud-watch-logs", "s3")
     pub destination_type: String,
-    /// The flow log ID
     pub flow_log_id: String,
-    /// Tags associated with the flow log
     pub tags: std::collections::HashMap<String, String>,
+
     /// Parsed field names from the log format (lazily computed, not serialized)
     #[serde(skip)]
     pub parsed_fields: Option<Arc<ParsedFields>>, // Use an Arc to reduce clone costs
@@ -111,7 +106,6 @@ pub struct FlowLogCache {
 }
 
 impl FlowLogCache {
-    /// Create a new empty flow log cache
     pub fn new() -> Self {
         Self {
             inner: HashMap::new(),

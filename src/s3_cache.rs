@@ -63,11 +63,6 @@ where
     T: Serialize + for<'de> Deserialize<'de>,
 {
     /// Create a new S3 cache
-    ///
-    /// # Arguments
-    /// * `client` - AWS S3 client
-    /// * `bucket` - S3 bucket name
-    /// * `key` - S3 object key for the cache file
     pub fn new(client: S3Client, bucket: String, key: String) -> Self {
         Self {
             client,
@@ -197,10 +192,6 @@ where
 
     /// Reload the cache from S3 and merge with the provided data using a merge function
     /// This is used when a conditional write fails
-    ///
-    /// # Arguments
-    /// * `local_data` - The local data to merge
-    /// * `merge_fn` - Function that takes (from_s3, local) and returns merged data
     pub async fn reload_and_merge<F>(
         &mut self,
         local_data: T,

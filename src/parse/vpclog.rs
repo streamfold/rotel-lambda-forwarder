@@ -41,34 +41,34 @@ pub(crate) fn parse_vpclog_to_map(
             let mut map = serde_json::Map::new();
             for (parsed_field, value) in parsed_fields.iter().zip(field_values.iter()) {
                 // Skip fields with "-" value (not present)
-                if value != "-" {
-                    match parsed_field.field_type {
-                        ParsedFieldType::String => {
+                if value == "-" {
+                    continue;
+                }
+
+                match parsed_field.field_type {
+                    ParsedFieldType::String => {
+                        map.insert(
+                            parsed_field.field_name.clone(),
+                            JsonValue::String(value.clone()),
+                        );
+                    }
+                    ParsedFieldType::Int32 | ParsedFieldType::Int64 => match value.parse::<i64>() {
+                        Ok(num) => {
                             map.insert(
                                 parsed_field.field_name.clone(),
-                                JsonValue::String(value.clone()),
+                                JsonValue::Number(serde_json::Number::from(num)),
                             );
                         }
-                        ParsedFieldType::Int32 | ParsedFieldType::Int64 => {
-                            match value.parse::<i64>() {
-                                Ok(num) => {
-                                    map.insert(
-                                        parsed_field.field_name.clone(),
-                                        JsonValue::Number(serde_json::Number::from(num)),
-                                    );
-                                }
-                                Err(e) => {
-                                    return Err(RecordParserError(
-                                        ParserError::FormatParseError(format!(
-                                            "Field {} unable to be parsed to integer: {}",
-                                            parsed_field.field_name, e
-                                        )),
-                                        value.clone(),
-                                    ));
-                                }
-                            }
+                        Err(e) => {
+                            return Err(RecordParserError(
+                                ParserError::FormatParseError(format!(
+                                    "Field {} unable to be parsed to integer: {}",
+                                    parsed_field.field_name, e
+                                )),
+                                value.clone(),
+                            ));
                         }
-                    }
+                    },
                 }
             }
 

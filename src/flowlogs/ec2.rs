@@ -39,11 +39,6 @@ impl Ec2FlowLogFetcher {
     /// Returns a map of log group name to flow log configuration.
     /// Only includes flow logs with destination type "cloud-watch-logs".
     ///
-    /// The returned configurations include:
-    /// - Log format string (for dynamic field parsing)
-    /// - Destination type
-    /// - Flow log ID
-    /// - Tags (which will be applied to logs as resource attributes)
     pub async fn fetch_all_flow_logs(&self) -> Result<HashMap<String, FlowLogConfig>, Ec2Error> {
         debug!("Fetching VPC flow logs from EC2 API");
 

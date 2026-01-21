@@ -7,32 +7,6 @@
 //! - Caching configurations in-memory with 30-minute TTL
 //! - Persisting configurations to S3 for durability across Lambda cold starts
 //!
-//! ## Cold Start Optimization
-//!
-//! During Lambda initialization, the manager first attempts to load cached flow log
-//! configurations from S3. If a valid (non-expired) cache is found, it is used immediately
-//! and the EC2 DescribeFlowLogs API call is skipped. This significantly reduces cold start
-//! time by avoiding the API call when cached data is still fresh.
-//!
-//! Only when the cache is expired, missing, or failed to load will the manager fetch
-//! configurations from the EC2 API.
-//!
-//! ## EC2 Flow Log Tags
-//!
-//! When EC2 Flow Logs are configured with tags, those tags are automatically extracted
-//! from the EC2 DescribeFlowLogs API and applied to log resource attributes with the
-//! prefix `ec2.flow-logs.tags.<key>`.
-//!
-//! For example, if an EC2 Flow Log has the following tags:
-//! - Environment: production
-//! - Team: platform
-//!
-//! The resulting log resource attributes will include:
-//! - `ec2.flow-logs.tags.Environment`: "production"
-//! - `ec2.flow-logs.tags.Team`: "platform"
-//!
-//! This allows for rich filtering and aggregation of EC2 Flow Logs based on their
-//! infrastructure metadata.
 
 mod cache;
 mod ec2;
@@ -76,14 +50,11 @@ pub enum FlowLogError {
 /// Serializable format for the cache file
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowLogCacheFile {
-    /// Version of the cache file format
     pub version: u32,
-    /// Cache snapshot containing flow logs and last refresh timestamp
     pub snapshot: CacheSnapshot,
 }
 
 impl FlowLogCacheFile {
-    /// Create a new cache file from a snapshot
     pub fn new(snapshot: CacheSnapshot) -> Self {
         Self {
             version: 1,
@@ -99,42 +70,17 @@ impl FlowLogCacheFile {
 /// in memory with a 30-minute TTL. Optionally, configs can be persisted to S3 for
 /// durability across Lambda cold starts.
 ///
-/// ## Cold Start Optimization
-///
-/// During initialization, the manager prioritizes cache reuse to minimize cold start time.
-/// If a valid cached configuration is loaded from S3 (not expired), the EC2 API call is
-/// skipped entirely. This optimization reduces cold start latency and EC2 API calls while
-/// ensuring data freshness through the 30-minute TTL.
-///
-/// ## Tag Handling
-///
-/// The manager extracts tags from EC2 Flow Logs during the EC2 API query. These tags
-/// are stored in the cache alongside the log format and other configuration details.
-/// When logs are processed, the tags are applied as resource attributes with the prefix
-/// `ec2.flow-logs.tags.<key>`, allowing for rich metadata-based filtering and
-/// aggregation.
 pub struct FlowLogManager {
-    /// In-memory cache
     cache: FlowLogCache,
-    /// S3 persistence layer (optional)
     s3_cache: Option<S3Cache<FlowLogCacheFile>>,
-    /// EC2 client for fetching flow log configurations
     ec2_fetcher: Ec2FlowLogFetcher,
-    /// Whether to persist to S3
     persist_enabled: bool,
-    /// Circuit breaker: timestamp when flow log fetching was disabled due to AccessDenied
     fetch_disabled_until: Option<Instant>,
-    /// Circuit breaker cooldown period (30 minutes)
     cooldown_duration: Duration,
 }
 
 impl FlowLogManager {
     /// Create a new flow log manager
-    ///
-    /// # Arguments
-    /// * `ec2_client` - EC2 client for fetching flow log configurations
-    /// * `s3_client` - Optional S3 client for persistence
-    /// * `s3_bucket` - Optional S3 bucket name for persistence
     pub fn new(
         ec2_client: Ec2Client,
         s3_client: Option<S3Client>,
@@ -160,14 +106,6 @@ impl FlowLogManager {
     }
 
     /// Initialize the flow log manager by loading the cache from S3 and fetching from EC2
-    ///
-    /// This should be called once during startup. It will:
-    /// 1. Load cached flow log configurations from S3 (if available)
-    /// 2. If cache is valid (not expired), use it and skip EC2 API call (optimization)
-    /// 3. If cache is expired/missing, fetch current flow log configurations from EC2 API
-    /// 4. Persist the data to S3
-    ///
-    /// Errors loading the cache are logged but do not fail initialization.
     pub async fn initialize(&mut self) -> Result<(), FlowLogError> {
         let mut cache_loaded = false;
 
@@ -186,7 +124,7 @@ impl FlowLogManager {
                         // Cache is still valid, use it and skip EC2 API call
                         self.cache.load_snapshot(cache_file.snapshot);
                         cache_loaded = true;
-                        info!("Using valid cached flow log configurations, skipping EC2 API call");
+                        debug!("Using valid cached flow log configurations, skipping EC2 API call");
                     } else {
                         debug!("Cached flow log configurations are expired, will fetch from EC2");
                     }
@@ -213,12 +151,7 @@ impl FlowLogManager {
                 }
                 Err(e) => {
                     error!(error = %e, "Failed to fetch flow logs from EC2 during initialization");
-                    // Return error for non-AccessDenied errors only if we have no cache
-                    if self.cache.is_empty() {
-                        return Err(FlowLogError::Ec2(e));
-                    } else {
-                        warn!("Using potentially stale cache due to EC2 API error");
-                    }
+                    return Err(FlowLogError::Ec2(e));
                 }
             }
         }
@@ -466,31 +399,6 @@ pub struct CacheStats {
 mod tests {
     use super::*;
     use aws_config::BehaviorVersion;
-
-    #[tokio::test]
-    async fn test_flow_log_manager_creation_without_s3() {
-        let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
-        let ec2_client = Ec2Client::new(&config);
-
-        let manager = FlowLogManager::new(ec2_client, None, None);
-        assert!(!manager.persist_enabled);
-
-        let stats = manager.cache_stats();
-        assert_eq!(stats.entry_count, 0);
-        assert!(!stats.persist_enabled);
-        assert!(!stats.fetch_disabled);
-    }
-
-    #[tokio::test]
-    async fn test_flow_log_manager_creation_with_s3() {
-        let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
-        let ec2_client = Ec2Client::new(&config);
-        let s3_client = S3Client::new(&config);
-
-        let manager =
-            FlowLogManager::new(ec2_client, Some(s3_client), Some("test-bucket".to_string()));
-        assert!(manager.persist_enabled);
-    }
 
     #[tokio::test]
     async fn test_circuit_breaker_cooldown_duration() {

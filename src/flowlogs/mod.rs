@@ -52,7 +52,7 @@ use std::{
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
-use crate::s3_cache::{S3Cache, S3CacheError};
+use crate::{flowlogs::cache::get_field_type, s3_cache::{S3Cache, S3CacheError}};
 
 /// S3 cache key for storing flow log configurations
 const FLOW_LOG_CACHE_KEY: &str = "rotel-lambda-forwarder/cache/flow-logs/configs.json.gz";
@@ -415,8 +415,6 @@ impl FlowLogManager {
 /// This function extracts the field names between ${ and } and assigns types based on
 /// the AWS VPC Flow Logs documentation.
 pub fn parse_log_format(log_format: &str) -> Vec<ParsedField> {
-    use crate::flowlogs::cache::{ParsedField, get_field_type};
-
     let mut fields = Vec::new();
     let mut chars = log_format.chars().peekable();
 

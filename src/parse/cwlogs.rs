@@ -8,11 +8,11 @@ use opentelemetry_proto::tonic::{
     logs::v1::{ResourceLogs, ScopeLogs},
     resource::v1::Resource,
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{
     aws_attributes::AwsAttributes,
-    flowlogs::{FlowLogManager, ParsedField, ParsedFields},
+    flowlogs::{FlowLogManager, ParsedFields},
     parse::record_parser::RecordParser,
     tags::TagManager,
 };

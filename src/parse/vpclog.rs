@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use serde_json::Value as JsonValue;
 
-use crate::flowlogs::ParsedFields;
+use crate::flowlogs::{ParsedFieldType, ParsedFields};
 use crate::parse::{cwlogs::ParserError, record_parser::RecordParserError};
 
 /// Parse an EC2 Flow Log record from a string using pre-parsed field names
@@ -42,10 +42,33 @@ pub(crate) fn parse_vpclog_to_map(
             for (parsed_field, value) in parsed_fields.iter().zip(field_values.iter()) {
                 // Skip fields with "-" value (not present)
                 if value != "-" {
-                    map.insert(
-                        parsed_field.field_name.clone(),
-                        JsonValue::String(value.clone()),
-                    );
+                    match parsed_field.field_type {
+                        ParsedFieldType::String => {
+                            map.insert(
+                                parsed_field.field_name.clone(),
+                                JsonValue::String(value.clone()),
+                            );
+                        }
+                        ParsedFieldType::Int32 | ParsedFieldType::Int64 => {
+                            match value.parse::<i64>() {
+                                Ok(num) => {
+                                    map.insert(
+                                        parsed_field.field_name.clone(),
+                                        JsonValue::Number(serde_json::Number::from(num)),
+                                    );
+                                }
+                                Err(e) => {
+                                    return Err(RecordParserError(
+                                        ParserError::FormatParseError(format!(
+                                            "Field {} unable to be parsed to integer: {}",
+                                            parsed_field.field_name, e
+                                        )),
+                                        value.clone(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -87,7 +110,8 @@ mod tests {
     /// Test utility: Parse a log message and return the LogRecord
     fn parse_log_msg(message: &str) -> LogRecord {
         let log_entry = create_log_entry(message);
-        let parser = RecordParser::new(LogPlatform::Unknown, ParserType::VpcLog, None);
+        let dflt_fields = parse_log_format(DEFAULT_FORMAT);
+        let parser = RecordParser::new(LogPlatform::Unknown, ParserType::VpcLog, Some(Arc::new(ParsedFields::Success(dflt_fields))));
         parser.parse(123456789, log_entry)
     }
 

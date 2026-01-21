@@ -80,8 +80,9 @@ impl<'a> Parser<'a> {
             .as_nanos() as u64;
 
         // Detect platform and parser type
-        let (log_platform, parser_type, flow_log_parsed_fields, flow_log_tags) =
-            self.detect_log_type(&log_data.log_group, &log_data.log_stream);
+        let (log_platform, parser_type, flow_log_parsed_fields, flow_log_tags) = self
+            .detect_log_type(&log_data.log_group, &log_data.log_stream)
+            .await;
 
         // Fetch tags for the log group
         let log_group_tags = self
@@ -248,7 +249,7 @@ pub enum ParserType {
 impl<'a> Parser<'a> {
     /// Detects the log platform and parser type based on log group and stream names
     /// Returns (platform, parser_type, optional_flow_log_parsed_fields, flow_log_tags)
-    fn detect_log_type(
+    async fn detect_log_type(
         &mut self,
         log_group_name: &str,
         log_stream_name: &str,
@@ -259,7 +260,7 @@ impl<'a> Parser<'a> {
         HashMap<String, String>,
     ) {
         // First check if this is an EC2 Flow Log
-        if let Some(flow_log_config) = self.flow_log_manager.get_config(log_group_name) {
+        if let Some(flow_log_config) = self.flow_log_manager.get_config(log_group_name).await {
             debug!(
                 log_group = %log_group_name,
                 flow_log_id = %flow_log_config.flow_log_id,

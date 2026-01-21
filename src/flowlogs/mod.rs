@@ -107,7 +107,40 @@ impl FlowLogManager {
 
     /// Initialize the flow log manager by loading the cache from S3 and fetching from EC2
     pub async fn initialize(&mut self) -> Result<(), FlowLogError> {
-        let mut cache_loaded = false;
+        match self.reload_cache_if_needed().await {
+            Ok(_) => {
+                info!("Flow log manager initialization complete");
+                Ok(())
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to fetch flow logs from EC2 during initialization");
+                Err(FlowLogError::Ec2(e))
+            }
+        }
+    }
+
+    /// Reload cache from S3 or EC2 if needed
+    ///
+    /// First attempts to load a valid (non-expired) cache from S3.
+    /// If S3 cache doesn't exist or is expired, fetches from EC2.
+    /// Returns Ok(true) if cache was successfully loaded/refreshed, Ok(false) if using existing cache.
+    async fn reload_cache_if_needed(&mut self) -> Result<(), Ec2Error> {
+        // Check if fetching is currently disabled due to AccessDenied
+        if let Some(disabled_until) = self.fetch_disabled_until {
+            let now = Instant::now();
+            if now < disabled_until {
+                let remaining = disabled_until.duration_since(now);
+                debug!(
+                    remaining_seconds = remaining.as_secs(),
+                    "Flow log fetching is disabled due to AccessDenied"
+                );
+                return Ok(());
+            } else {
+                // Cooldown period has elapsed, re-enable fetching
+                info!("Cooldown period elapsed, attempting to fetch flow logs again");
+                self.fetch_disabled_until = None;
+            }
+        }
 
         // Load from S3 if available
         if let Some(s3_cache) = &mut self.s3_cache {
@@ -123,8 +156,8 @@ impl FlowLogManager {
                     if !is_expired {
                         // Cache is still valid, use it and skip EC2 API call
                         self.cache.load_snapshot(cache_file.snapshot);
-                        cache_loaded = true;
                         debug!("Using valid cached flow log configurations, skipping EC2 API call");
+                        return Ok(());
                     } else {
                         debug!("Cached flow log configurations are expired, will fetch from EC2");
                     }
@@ -133,38 +166,65 @@ impl FlowLogManager {
                     debug!("No existing flow log cache found in S3");
                 }
                 Err(e) => {
-                    error!(error = %e, "Failed to load flow log cache from S3, continuing with empty cache");
-                    // Don't fail initialization, just start with empty cache
+                    error!(error = %e, "Failed to load flow log cache from S3, will refresh");
+                    // Don't fail, just continue without S3 cache
                 }
             }
         }
 
-        // Only fetch from EC2 if we don't have a valid cache
-        if !cache_loaded {
-            match self.fetch_and_update_all().await {
-                Ok(_) => {
-                    info!("Successfully fetched and cached flow log configurations from EC2");
-                }
-                Err(Ec2Error::AccessDenied(_)) => {
-                    warn!("Access denied when fetching flow logs from EC2, using cached data only");
-                    // Don't fail initialization, just use cached data (if any)
-                }
-                Err(e) => {
-                    error!(error = %e, "Failed to fetch flow logs from EC2 during initialization");
-                    return Err(FlowLogError::Ec2(e));
-                }
+        // Only fetch from EC2 if we don't have a valid cache, will persist to S3 if loaded
+        match self.fetch_and_update_all().await {
+            Ok(_) => {
+                info!("Successfully fetched and cached flow log configurations from EC2");
+                Ok(())
+            }
+            Err(Ec2Error::AccessDenied(e)) => {
+                warn!(error = ?e, "Access denied when fetching flow logs from EC2");
+                // Disable fetching for the next 30 minutes
+                let disabled_until = Instant::now() + self.cooldown_duration;
+                self.fetch_disabled_until = Some(disabled_until);
+
+                warn!(
+                    cooldown_minutes = self.cooldown_duration.as_secs() / 60,
+                    "AccessDenied error, disabling flow log fetching"
+                );
+
+                Ok(()) // Don't fail, just use cached data (if any) 
+            }
+            Err(e) => {
+                // For other errors, propagate them
+                Err(e)
             }
         }
-
-        info!("Flow log manager initialization complete");
-        Ok(())
     }
 
     /// Get flow log configuration for a log group
-    ///
     /// First checks the in-memory cache. Returns None if not found or expired.
     /// Lazily parses the log format fields on first access and caches the result.
-    pub fn get_config(&mut self, log_group_name: &str) -> Option<FlowLogConfig> {
+    pub async fn get_config(&mut self, log_group_name: &str) -> Option<FlowLogConfig> {
+        // Check if cache is expired
+        if self.cache.is_expired() {
+            debug!(
+                log_group = %log_group_name,
+                "Cache expired, attempting to reload"
+            );
+
+            // Attempt to reload cache from S3 or EC2
+            match self.reload_cache_if_needed().await {
+                Ok(_) => {
+                    debug!("Successfully reloaded flow log cache");
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        log_group = %log_group_name,
+                        "Cache expired and could not be reloaded"
+                    );
+                    return None;
+                }
+            }
+        }
+
         // Get a mutable reference to the config so we can parse fields if needed
         let config = self.cache.get_mut(log_group_name)?;
 
@@ -199,43 +259,11 @@ impl FlowLogManager {
 
     /// Fetch all flow logs from EC2 and update the cache
     async fn fetch_and_update_all(&mut self) -> Result<(), Ec2Error> {
-        // Check if fetching is currently disabled due to AccessDenied
-        if let Some(disabled_until) = self.fetch_disabled_until {
-            let now = Instant::now();
-            if now < disabled_until {
-                let remaining = disabled_until.duration_since(now);
-                warn!(
-                    remaining_seconds = remaining.as_secs(),
-                    "Flow log fetching is disabled due to AccessDenied"
-                );
-                return Ok(());
-            } else {
-                // Cooldown period has elapsed, re-enable fetching
-                info!("Cooldown period elapsed, attempting to fetch flow logs again");
-                self.fetch_disabled_until = None;
-            }
-        }
-
         debug!("Fetching flow logs from EC2");
 
         let flow_log_configs = match self.ec2_fetcher.fetch_all_flow_logs().await {
             Ok(configs) => configs,
-            Err(Ec2Error::AccessDenied(_)) => {
-                // Disable fetching for the next 30 minutes
-                let disabled_until = Instant::now() + self.cooldown_duration;
-                self.fetch_disabled_until = Some(disabled_until);
-
-                warn!(
-                    cooldown_minutes = self.cooldown_duration.as_secs() / 60,
-                    "AccessDenied error, disabling flow log fetching"
-                );
-
-                return Err(Ec2Error::AccessDenied(
-                    "AccessDenied when fetching flow logs".to_string(),
-                ));
-            }
             Err(e) => {
-                // For other errors, propagate them normally
                 return Err(e);
             }
         };
@@ -462,7 +490,7 @@ mod tests {
         assert!(!manager.cache.is_expired());
         assert_eq!(manager.cache.len(), 1);
 
-        let config = manager.get_config("/aws/ec2/test-flowlogs");
+        let config = manager.get_config("/aws/ec2/test-flowlogs").await;
         assert!(config.is_some());
         assert_eq!(config.unwrap().flow_log_id, "fl-test123");
     }
@@ -502,5 +530,53 @@ mod tests {
         assert_eq!(fields[0].field_name, "version");
         assert_eq!(fields[1].field_name, "account-id");
         assert_eq!(fields[2].field_name, "interface-id");
+    }
+
+    #[tokio::test]
+    async fn test_cache_expiration_and_reload() {
+        use crate::flowlogs::cache::{CacheSnapshot, FlowLogConfig};
+        use std::collections::HashMap;
+
+        let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
+        let ec2_client = Ec2Client::new(&config);
+
+        let mut manager = FlowLogManager::new(ec2_client, None, None);
+
+        // Manually insert a cache entry with an expired timestamp
+        let mut flow_logs = HashMap::new();
+        flow_logs.insert(
+            "/aws/ec2/expired-flowlogs".to_string(),
+            FlowLogConfig {
+                log_format: "${version} ${account-id}".to_string(),
+                destination_type: "cloud-watch-logs".to_string(),
+                flow_log_id: "fl-expired123".to_string(),
+                tags: HashMap::new(),
+                parsed_fields: None,
+            },
+        );
+
+        // Create an expired snapshot (older than 30 minutes)
+        let expired_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 1900; // 31+ minutes ago
+
+        let snapshot = CacheSnapshot {
+            flow_logs,
+            last_refreshed_secs: expired_time,
+        };
+
+        manager.cache.load_snapshot(snapshot);
+
+        // Verify cache is expired but entries are still present
+        assert!(manager.cache.is_expired());
+        // Note: cache.len() still returns 1 because expired cache doesn't clear entries,
+        // it just refuses to serve them
+
+        // Attempt to get config - should return None since cache is expired
+        // and we can't reload from EC2 (no permissions) or S3 (not configured)
+        let config = manager.get_config("/aws/ec2/expired-flowlogs").await;
+        assert!(config.is_none());
     }
 }

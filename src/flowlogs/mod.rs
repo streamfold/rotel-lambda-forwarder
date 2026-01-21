@@ -52,7 +52,10 @@ use std::{
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
-use crate::{flowlogs::cache::get_field_type, s3_cache::{S3Cache, S3CacheError}};
+use crate::{
+    flowlogs::cache::get_field_type,
+    s3_cache::{S3Cache, S3CacheError},
+};
 
 /// S3 cache key for storing flow log configurations
 const FLOW_LOG_CACHE_KEY: &str = "rotel-lambda-forwarder/cache/flow-logs/configs.json.gz";

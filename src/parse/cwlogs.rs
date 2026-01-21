@@ -215,7 +215,7 @@ pub enum LogPlatform {
     Lambda,
     Codebuild,
     Cloudtrail,
-    Vpc,
+    VpcFlowLog,
     Unknown,
 }
 
@@ -229,7 +229,7 @@ impl LogPlatform {
             LogPlatform::Lambda => "aws_lambda",
             LogPlatform::Codebuild => "aws_codebuild",
             LogPlatform::Cloudtrail => "aws_cloudtrail",
-            LogPlatform::Vpc => "aws_vpc",
+            LogPlatform::VpcFlowLog => "aws_vpc_flow_log",
             LogPlatform::Unknown => "aws_unknown",
         }
     }
@@ -270,7 +270,7 @@ impl<'a> Parser<'a> {
             let parsed_fields = flow_log_config.parsed_fields.as_ref().cloned();
 
             return (
-                LogPlatform::Vpc,
+                LogPlatform::VpcFlowLog,
                 ParserType::VpcLog,
                 parsed_fields,
                 flow_log_config.tags,
@@ -295,27 +295,6 @@ impl<'a> Parser<'a> {
 
         (platform, parser_type, None, HashMap::new())
     }
-}
-
-/// Old detect_log_type function for backwards compatibility in tests
-#[allow(dead_code)]
-fn detect_log_type_compat(
-    log_group_name: &str,
-    log_stream_name: &str,
-) -> (LogPlatform, ParserType) {
-    let platform = detect_log_platform(log_group_name, log_stream_name);
-    let parser_type = match platform {
-        LogPlatform::Eks => {
-            if log_stream_name.starts_with("authenticator-") {
-                ParserType::KeyValue
-            } else {
-                ParserType::Unknown
-            }
-        }
-        LogPlatform::Cloudtrail => ParserType::Json,
-        _ => ParserType::Unknown,
-    };
-    (platform, parser_type)
 }
 
 static CLOUDTRAIL_REGEX: LazyLock<Regex> =
@@ -402,19 +381,13 @@ mod tests {
     async fn test_parse_eks_authenticator_log() {
         let log_msg = r#"time="2025-12-24T19:48:32Z" level=info msg="access granted" arn="arn:aws:iam::927209226484:role/AWSWesleyClusterManagerLambda-Add-AddonManagerRole-1CRTQUJF13T5U" client="127.0.0.1:54812" groups="[]" method=POST path=/authenticate stsendpoint=sts.us-east-1.amazonaws.com uid="aws-iam-authenticator:927209226484:AROA5PYP2AD2FVXU23CA6" username="eks:addon-manager""#;
 
-        // Test that EKS authenticator logs are detected as KeyValue parser type
-        let (platform, parser_type) =
-            detect_log_type_compat("/aws/eks/cluster-name", "authenticator-12345");
-        assert_eq!(platform, LogPlatform::Eks);
-        assert_eq!(parser_type, ParserType::KeyValue);
-
         // Test parsing the log entry
         let mut log_entry = LogEntry::default();
         log_entry.id = "test-id".to_string();
         log_entry.timestamp = 1000;
         log_entry.message = log_msg.to_string();
 
-        let rec_parser = RecordParser::new(platform, parser_type, None);
+        let rec_parser = RecordParser::new(LogPlatform::Eks, ParserType::KeyValue, None);
         let log_record = rec_parser.parse(123456789, log_entry);
 
         // Verify the log was parsed correctly
@@ -443,57 +416,52 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_log_type_eks() {
-        let (platform, parser_type) =
-            detect_log_type_compat("/aws/eks/cluster-name", "application-pod");
+    fn test_detect_log_platform_eks() {
+        let platform = detect_log_platform("/aws/eks/cluster-name", "authenticator-12345");
         assert_eq!(platform, LogPlatform::Eks);
-        assert_eq!(parser_type, ParserType::Unknown);
     }
 
     #[test]
-    fn test_detect_log_type_eks_authenticator() {
-        let (platform, parser_type) =
-            detect_log_type_compat("/aws/eks/cluster-name", "authenticator-12345");
-        assert_eq!(platform, LogPlatform::Eks);
-        assert_eq!(parser_type, ParserType::KeyValue);
-    }
-
-    #[test]
-    fn test_detect_log_type_ecs() {
-        let (platform, parser_type) =
-            detect_log_type_compat("/aws/ecs/cluster-name", "task/service");
+    fn test_detect_log_platform_ecs() {
+        let platform = detect_log_platform("/aws/ecs/cluster-name", "task/service");
         assert_eq!(platform, LogPlatform::Ecs);
-        assert_eq!(parser_type, ParserType::Unknown);
     }
 
     #[test]
-    fn test_detect_log_type_rds() {
-        let (platform, parser_type) = detect_log_type_compat("/aws/rds/instance-name", "error");
+    fn test_detect_log_platform_rds() {
+        let platform = detect_log_platform("/aws/rds/instance-name", "error");
         assert_eq!(platform, LogPlatform::Rds);
-        assert_eq!(parser_type, ParserType::Unknown);
     }
 
     #[test]
-    fn test_detect_log_type_lambda() {
-        let (platform, parser_type) =
-            detect_log_type_compat("/aws/lambda/function-name", "2024/01/01/[$LATEST]abc123");
+    fn test_detect_log_platform_lambda() {
+        let platform =
+            detect_log_platform("/aws/lambda/function-name", "2024/01/01/[$LATEST]abc123");
         assert_eq!(platform, LogPlatform::Lambda);
-        assert_eq!(parser_type, ParserType::Unknown);
     }
 
     #[test]
-    fn test_detect_log_type_no_match() {
-        let (platform, parser_type) =
-            detect_log_type_compat("/aws/route53/function-name", "stream");
+    fn test_detect_log_platform_no_match() {
+        let platform = detect_log_platform("/aws/route53/function-name", "stream");
         assert_eq!(platform, LogPlatform::Unknown);
-        assert_eq!(parser_type, ParserType::Unknown);
 
-        let (platform, parser_type) = detect_log_type_compat("/custom/log/group", "stream");
+        let platform = detect_log_platform("/custom/log/group", "stream");
         assert_eq!(platform, LogPlatform::Unknown);
-        assert_eq!(parser_type, ParserType::Unknown);
 
-        let (platform, parser_type) = detect_log_type_compat("no-prefix", "stream");
+        let platform = detect_log_platform("no-prefix", "stream");
         assert_eq!(platform, LogPlatform::Unknown);
-        assert_eq!(parser_type, ParserType::Unknown);
+    }
+
+    #[test]
+    fn test_detect_log_platform_cloudtrail() {
+        let platform =
+            detect_log_platform("/aws/cloudtrail/logs", "123456789012_CloudTrail_us-east-1");
+        assert_eq!(platform, LogPlatform::Cloudtrail);
+    }
+
+    #[test]
+    fn test_detect_log_platform_codebuild() {
+        let platform = detect_log_platform("/aws/codebuild/project-name", "stream");
+        assert_eq!(platform, LogPlatform::Codebuild);
     }
 }

@@ -1,5 +1,6 @@
 use regex::Regex;
 use std::sync::LazyLock;
+use std::{collections::HashMap, sync::Arc};
 
 use aws_lambda_events::cloudwatch_logs::LogsEvent;
 use opentelemetry_proto::tonic::{
@@ -9,13 +10,19 @@ use opentelemetry_proto::tonic::{
 };
 use tracing::debug;
 
-use crate::{aws_attributes::AwsAttributes, parse::record_parser::RecordParser, tags::TagManager};
+use crate::{
+    aws_attributes::AwsAttributes,
+    flowlogs::{FlowLogManager, ParsedFields},
+    parse::record_parser::RecordParser,
+    tags::TagManager,
+};
 
 /// Parser handles the conversion of AWS CloudWatch Logs events into OpenTelemetry ResourceLogs
 pub struct Parser<'a> {
     aws_attributes: &'a AwsAttributes,
     request_id: &'a String,
     tag_manager: &'a mut TagManager,
+    flow_log_manager: &'a mut FlowLogManager,
 }
 
 impl<'a> Parser<'a> {
@@ -23,11 +30,13 @@ impl<'a> Parser<'a> {
         aws_attributes: &'a AwsAttributes,
         request_id: &'a String,
         tag_manager: &'a mut TagManager,
+        flow_log_manager: &'a mut FlowLogManager,
     ) -> Self {
         Self {
             aws_attributes,
             request_id,
             tag_manager,
+            flow_log_manager,
         }
     }
 
@@ -71,8 +80,9 @@ impl<'a> Parser<'a> {
             .as_nanos() as u64;
 
         // Detect platform and parser type
-        let (log_platform, parser_type) =
-            detect_log_type(&log_data.log_group, &log_data.log_stream);
+        let (log_platform, parser_type, flow_log_parsed_fields, flow_log_tags) = self
+            .detect_log_type(&log_data.log_group, &log_data.log_stream)
+            .await;
 
         // Fetch tags for the log group
         let log_group_tags = self
@@ -137,7 +147,7 @@ impl<'a> Parser<'a> {
             });
         }
 
-        // Add tags as resource attributes
+        // Add CloudWatch log group tags as resource attributes
         for (tag_key, tag_value) in log_group_tags {
             attributes.push(KeyValue {
                 key: format!("cloudwatch.log.tags.{}", tag_key),
@@ -147,7 +157,17 @@ impl<'a> Parser<'a> {
             });
         }
 
-        let rec_parser = RecordParser::new(log_platform, parser_type);
+        // Add EC2 Flow Log tags as resource attributes
+        for (tag_key, tag_value) in flow_log_tags {
+            attributes.push(KeyValue {
+                key: format!("ec2.flow-logs.tags.{}", tag_key),
+                value: Some(AnyValue {
+                    value: Some(Value::StringValue(tag_value)),
+                }),
+            });
+        }
+
+        let rec_parser = RecordParser::new(log_platform, parser_type, flow_log_parsed_fields);
         let log_records = log_data
             .log_events
             .into_iter()
@@ -196,6 +216,7 @@ pub enum LogPlatform {
     Lambda,
     Codebuild,
     Cloudtrail,
+    VpcFlowLog,
     Unknown,
 }
 
@@ -209,6 +230,7 @@ impl LogPlatform {
             LogPlatform::Lambda => "aws_lambda",
             LogPlatform::Codebuild => "aws_codebuild",
             LogPlatform::Cloudtrail => "aws_cloudtrail",
+            LogPlatform::VpcFlowLog => "aws_vpc_flow_log",
             LogPlatform::Unknown => "aws_unknown",
         }
     }
@@ -219,29 +241,61 @@ impl LogPlatform {
 pub enum ParserType {
     Json,
     KeyValue,
+    VpcLog,
     #[default]
     Unknown,
 }
 
-/// Detects the log platform and parser type based on log group and stream names
-fn detect_log_type(log_group_name: &str, log_stream_name: &str) -> (LogPlatform, ParserType) {
-    // First, detect the platform
-    let platform = detect_log_platform(log_group_name, log_stream_name);
+impl<'a> Parser<'a> {
+    /// Detects the log platform and parser type based on log group and stream names
+    /// Returns (platform, parser_type, optional_flow_log_parsed_fields, flow_log_tags)
+    async fn detect_log_type(
+        &mut self,
+        log_group_name: &str,
+        log_stream_name: &str,
+    ) -> (
+        LogPlatform,
+        ParserType,
+        Option<Arc<ParsedFields>>,
+        HashMap<String, String>,
+    ) {
+        // First check if this is an EC2 Flow Log
+        if let Some(flow_log_config) = self.flow_log_manager.get_config(log_group_name).await {
+            debug!(
+                log_group = %log_group_name,
+                flow_log_id = %flow_log_config.flow_log_id,
+                "Detected EC2 Flow Log"
+            );
 
-    // Then, determine the parser type based on platform and log stream name
-    let parser_type = match platform {
-        LogPlatform::Eks => {
-            if log_stream_name.starts_with("authenticator-") {
-                ParserType::KeyValue
-            } else {
-                ParserType::Unknown
-            }
+            // Extract parsed fields if successful, None if parsing failed or not attempted
+            let parsed_fields = flow_log_config.parsed_fields.as_ref().cloned();
+
+            return (
+                LogPlatform::VpcFlowLog,
+                ParserType::VpcLog,
+                parsed_fields,
+                flow_log_config.tags,
+            );
         }
-        LogPlatform::Cloudtrail => ParserType::Json,
-        _ => ParserType::Unknown,
-    };
 
-    (platform, parser_type)
+        // Otherwise, detect the platform normally
+        let platform = detect_log_platform(log_group_name, log_stream_name);
+
+        // Then, determine the parser type based on platform and log stream name
+        let parser_type = match platform {
+            LogPlatform::Eks => {
+                if log_stream_name.starts_with("authenticator-") {
+                    ParserType::KeyValue
+                } else {
+                    ParserType::Unknown
+                }
+            }
+            LogPlatform::Cloudtrail => ParserType::Json,
+            _ => ParserType::Unknown,
+        };
+
+        (platform, parser_type, None, HashMap::new())
+    }
 }
 
 static CLOUDTRAIL_REGEX: LazyLock<Regex> =
@@ -284,7 +338,10 @@ pub enum ParserError {
     JsonParseError(String),
 
     #[error("Invalid log format: {0}")]
-    InvalidFormat(String),
+    FormatParseError(String),
+
+    #[error("Unable to parse EC2 flow log format")]
+    FlowLogFormatError,
 }
 
 #[cfg(test)]
@@ -304,7 +361,15 @@ mod tests {
         let cw_client = aws_sdk_cloudwatchlogs::Client::new(&config);
         let mut tag_manager = crate::tags::TagManager::new(cw_client, None, None);
 
-        let mut parser = Parser::new(&aws_attributes, &request_id, &mut tag_manager);
+        let ec2_client = aws_sdk_ec2::Client::new(&config);
+        let mut flow_log_manager = crate::flowlogs::FlowLogManager::new(ec2_client, None, None);
+
+        let mut parser = Parser::new(
+            &aws_attributes,
+            &request_id,
+            &mut tag_manager,
+            &mut flow_log_manager,
+        );
         let result = parser.parse(logs_event).await;
 
         assert!(result.is_ok());
@@ -317,19 +382,13 @@ mod tests {
     async fn test_parse_eks_authenticator_log() {
         let log_msg = r#"time="2025-12-24T19:48:32Z" level=info msg="access granted" arn="arn:aws:iam::927209226484:role/AWSWesleyClusterManagerLambda-Add-AddonManagerRole-1CRTQUJF13T5U" client="127.0.0.1:54812" groups="[]" method=POST path=/authenticate stsendpoint=sts.us-east-1.amazonaws.com uid="aws-iam-authenticator:927209226484:AROA5PYP2AD2FVXU23CA6" username="eks:addon-manager""#;
 
-        // Test that EKS authenticator logs are detected as KeyValue parser type
-        let (platform, parser_type) =
-            detect_log_type("/aws/eks/cluster-name", "authenticator-12345");
-        assert_eq!(platform, LogPlatform::Eks);
-        assert_eq!(parser_type, ParserType::KeyValue);
-
         // Test parsing the log entry
         let mut log_entry = LogEntry::default();
         log_entry.id = "test-id".to_string();
         log_entry.timestamp = 1000;
         log_entry.message = log_msg.to_string();
 
-        let rec_parser = RecordParser::new(platform, parser_type);
+        let rec_parser = RecordParser::new(LogPlatform::Eks, ParserType::KeyValue, None);
         let log_record = rec_parser.parse(123456789, log_entry);
 
         // Verify the log was parsed correctly
@@ -358,54 +417,52 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_log_type_eks() {
-        let (platform, parser_type) = detect_log_type("/aws/eks/cluster-name", "application-pod");
+    fn test_detect_log_platform_eks() {
+        let platform = detect_log_platform("/aws/eks/cluster-name", "authenticator-12345");
         assert_eq!(platform, LogPlatform::Eks);
-        assert_eq!(parser_type, ParserType::Unknown);
     }
 
     #[test]
-    fn test_detect_log_type_eks_authenticator() {
-        let (platform, parser_type) =
-            detect_log_type("/aws/eks/cluster-name", "authenticator-12345");
-        assert_eq!(platform, LogPlatform::Eks);
-        assert_eq!(parser_type, ParserType::KeyValue);
-    }
-
-    #[test]
-    fn test_detect_log_type_ecs() {
-        let (platform, parser_type) = detect_log_type("/aws/ecs/cluster-name", "task/service");
+    fn test_detect_log_platform_ecs() {
+        let platform = detect_log_platform("/aws/ecs/cluster-name", "task/service");
         assert_eq!(platform, LogPlatform::Ecs);
-        assert_eq!(parser_type, ParserType::Unknown);
     }
 
     #[test]
-    fn test_detect_log_type_rds() {
-        let (platform, parser_type) = detect_log_type("/aws/rds/instance-name", "error");
+    fn test_detect_log_platform_rds() {
+        let platform = detect_log_platform("/aws/rds/instance-name", "error");
         assert_eq!(platform, LogPlatform::Rds);
-        assert_eq!(parser_type, ParserType::Unknown);
     }
 
     #[test]
-    fn test_detect_log_type_lambda() {
-        let (platform, parser_type) =
-            detect_log_type("/aws/lambda/function-name", "2024/01/01/[$LATEST]abc123");
+    fn test_detect_log_platform_lambda() {
+        let platform =
+            detect_log_platform("/aws/lambda/function-name", "2024/01/01/[$LATEST]abc123");
         assert_eq!(platform, LogPlatform::Lambda);
-        assert_eq!(parser_type, ParserType::Unknown);
     }
 
     #[test]
-    fn test_detect_log_type_no_match() {
-        let (platform, parser_type) = detect_log_type("/aws/route53/function-name", "stream");
+    fn test_detect_log_platform_no_match() {
+        let platform = detect_log_platform("/aws/route53/function-name", "stream");
         assert_eq!(platform, LogPlatform::Unknown);
-        assert_eq!(parser_type, ParserType::Unknown);
 
-        let (platform, parser_type) = detect_log_type("/custom/log/group", "stream");
+        let platform = detect_log_platform("/custom/log/group", "stream");
         assert_eq!(platform, LogPlatform::Unknown);
-        assert_eq!(parser_type, ParserType::Unknown);
 
-        let (platform, parser_type) = detect_log_type("no-prefix", "stream");
+        let platform = detect_log_platform("no-prefix", "stream");
         assert_eq!(platform, LogPlatform::Unknown);
-        assert_eq!(parser_type, ParserType::Unknown);
+    }
+
+    #[test]
+    fn test_detect_log_platform_cloudtrail() {
+        let platform =
+            detect_log_platform("/aws/cloudtrail/logs", "123456789012_CloudTrail_us-east-1");
+        assert_eq!(platform, LogPlatform::Cloudtrail);
+    }
+
+    #[test]
+    fn test_detect_log_platform_codebuild() {
+        let platform = detect_log_platform("/aws/codebuild/project-name", "stream");
+        assert_eq!(platform, LogPlatform::Codebuild);
     }
 }

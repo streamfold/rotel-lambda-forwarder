@@ -20,7 +20,7 @@ pub(crate) fn parse_keyvalue_to_map(
 
     if pairs.is_empty() {
         return Err(RecordParserError(
-            ParserError::InvalidFormat("No valid key-value pairs found".to_string()),
+            ParserError::FormatParseError("No valid key-value pairs found".to_string()),
             input,
         ));
     }
@@ -166,7 +166,7 @@ mod tests {
     /// Test utility: Parse a log message and return the LogRecord
     fn parse_log_msg(message: &str, platform: LogPlatform) -> LogRecord {
         let log_entry = create_log_entry(message);
-        let parser = RecordParser::new(platform, ParserType::KeyValue);
+        let parser = RecordParser::new(platform, ParserType::KeyValue, None);
         parser.parse(123456789, log_entry)
     }
 

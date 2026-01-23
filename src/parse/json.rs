@@ -21,7 +21,7 @@ pub(crate) fn parse_json_to_map(
         Ok(_) => {
             // Not an object
             return Err(RecordParserError(
-                ParserError::InvalidFormat("JSON log entry is not an object".to_string()),
+                ParserError::FormatParseError("JSON log entry is not an object".to_string()),
                 msg,
             ));
         }
@@ -107,7 +107,7 @@ mod tests {
     /// Test utility: Parse a log message and return the LogRecord
     fn parse_log_msg(message: &str, platform: LogPlatform) -> LogRecord {
         let log_entry = create_log_entry(message);
-        let parser = RecordParser::new(platform, ParserType::Json);
+        let parser = RecordParser::new(platform, ParserType::Json, None);
         parser.parse(123456789, log_entry)
     }
 

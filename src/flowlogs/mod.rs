@@ -364,6 +364,7 @@ impl FlowLogManager {
     ///
     /// Returns information about the current state of the cache including
     /// the number of cached entries and whether fetching is currently disabled.
+    #[cfg(test)]
     pub fn cache_stats(&self) -> CacheStats {
         CacheStats {
             entry_count: self.cache.len(),
@@ -414,6 +415,7 @@ pub fn parse_log_format(log_format: &str) -> Vec<ParsedField> {
 
 /// Cache statistics
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub struct CacheStats {
     /// Number of entries currently in the cache
     pub entry_count: usize,

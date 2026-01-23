@@ -2,6 +2,12 @@
 
 An AWS Lambda function written in Rust that forwards CloudWatch Logs to OpenTelemetry-compatible backends. This function receives CloudWatch Logs events via subscription filters, transforms them into OpenTelemetry log format, and exports them using the [Rotel](https://github.com/streamfold/rotel) agent. This is built on the existing Rotel OpenTelemetry data plane, so logs can be exported to any [supported exporter](https://rotel.dev/docs/category/exporters).
 
+---
+
+By leveraging the high-performance Rotel data plane, Rotel Lambda Forwarder can transform CloudWatch logs at high-volume while minimizing Lambda runtime duration costs.
+![Invocation Performance](./contrib/invocation_perf.png)
+_Performance of 12 hours of VPC flow log forwarding to ClickHouse Cloud. Average invocation latency stays under 150ms._
+
 ## Features
 
 - **OpenTelemetry Native**: Transforms all logs to OpenTelemetry format

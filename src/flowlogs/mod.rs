@@ -189,7 +189,7 @@ impl FlowLogManager {
                     "AccessDenied error, disabling flow log fetching"
                 );
 
-                Ok(()) // Don't fail, just use cached data (if any) 
+                Ok(()) // Don't fail, just use cached data (if any)
             }
             Err(e) => {
                 // For other errors, propagate them
@@ -469,7 +469,6 @@ mod tests {
             "/aws/ec2/test-flowlogs".to_string(),
             FlowLogConfig {
                 log_format: "${version} ${account-id}".to_string(),
-                destination_type: "cloud-watch-logs".to_string(),
                 flow_log_id: "fl-test123".to_string(),
                 tags: HashMap::new(),
                 parsed_fields: None,
@@ -548,7 +547,6 @@ mod tests {
             "/aws/ec2/expired-flowlogs".to_string(),
             FlowLogConfig {
                 log_format: "${version} ${account-id}".to_string(),
-                destination_type: "cloud-watch-logs".to_string(),
                 flow_log_id: "fl-expired123".to_string(),
                 tags: HashMap::new(),
                 parsed_fields: None,

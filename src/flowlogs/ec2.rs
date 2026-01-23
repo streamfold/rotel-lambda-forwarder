@@ -1,4 +1,4 @@
-use aws_sdk_ec2::Client as Ec2Client;
+use aws_sdk_ec2::{Client as Ec2Client, types::LogDestinationType};
 use std::collections::HashMap;
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -61,18 +61,25 @@ impl Ec2FlowLogFetcher {
         // flow_logs() returns a slice, not an Option
         for flow_log in response.flow_logs() {
             // Only process CloudWatch Logs destinations
-            let destination_type = flow_log
-                .log_destination_type()
-                .map(|t| t.as_str())
-                .unwrap_or("");
-
-            if destination_type != "cloud-watch-logs" {
-                debug!(
-                    flow_log_id = ?flow_log.flow_log_id(),
-                    destination_type = %destination_type,
-                    "Skipping flow log with non-CloudWatch destination"
-                );
-                continue;
+            match flow_log.log_destination_type() {
+                Some(LogDestinationType::CloudWatchLogs) => {
+                    // Continue processing this flow log
+                }
+                Some(v) => {
+                    debug!(
+                        flow_log_id = ?flow_log.flow_log_id(),
+                        log_destination_type = v.to_string(),
+                        "Skipping flow log with non-CloudWatch destination"
+                    );
+                    continue;
+                }
+                None => {
+                    debug!(
+                        flow_log_id = ?flow_log.flow_log_id(),
+                        "Skipping flow log with unset log_destination_type"
+                    );
+                    continue;
+                }
             }
 
             // Get the log group name
@@ -113,7 +120,6 @@ impl Ec2FlowLogFetcher {
 
             let config = FlowLogConfig {
                 log_format,
-                destination_type: destination_type.to_string(),
                 flow_log_id: flow_log_id.clone(),
                 tags,
                 parsed_fields: None,

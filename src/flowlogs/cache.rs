@@ -80,8 +80,6 @@ pub enum ParsedFields {
 pub struct FlowLogConfig {
     /// The log format string (e.g., "${version} ${account-id} ${interface-id} ...")
     pub log_format: String,
-    /// The destination type (e.g., "cloud-watch-logs", "s3")
-    pub destination_type: String,
     pub flow_log_id: String,
     pub tags: std::collections::HashMap<String, String>,
 
@@ -267,7 +265,6 @@ mod tests {
         let mut cache = FlowLogCache::new();
         let config = FlowLogConfig {
             log_format: "${version} ${account-id} ${interface-id}".to_string(),
-            destination_type: "cloud-watch-logs".to_string(),
             flow_log_id: "fl-1234567890abcdef0".to_string(),
             tags: std::collections::HashMap::new(),
             parsed_fields: None,
@@ -314,7 +311,6 @@ mod tests {
 
         let config1 = FlowLogConfig {
             log_format: "${version} ${account-id}".to_string(),
-            destination_type: "cloud-watch-logs".to_string(),
             flow_log_id: "fl-111".to_string(),
             tags: std::collections::HashMap::new(),
             parsed_fields: None,
@@ -323,7 +319,6 @@ mod tests {
 
         let config2 = FlowLogConfig {
             log_format: "${version} ${interface-id}".to_string(),
-            destination_type: "s3".to_string(),
             flow_log_id: "fl-222".to_string(),
             tags: std::collections::HashMap::new(),
             parsed_fields: None,
@@ -349,7 +344,6 @@ mod tests {
 
         let config = FlowLogConfig {
             log_format: "${version} ${account-id}".to_string(),
-            destination_type: "cloud-watch-logs".to_string(),
             flow_log_id: "fl-123".to_string(),
             tags: std::collections::HashMap::new(),
             parsed_fields: None,
@@ -385,7 +379,6 @@ mod tests {
 
         let config = FlowLogConfig {
             log_format: "${version} ${account-id} ${interface-id}".to_string(),
-            destination_type: "cloud-watch-logs".to_string(),
             flow_log_id: "fl-1234567890abcdef0".to_string(),
             tags: tags.clone(),
             parsed_fields: None,
@@ -456,7 +449,6 @@ mod tests {
 
         let config = FlowLogConfig {
             log_format: "${version} ${account-id}".to_string(),
-            destination_type: "cloud-watch-logs".to_string(),
             flow_log_id: "fl-123".to_string(),
             tags: std::collections::HashMap::new(),
             parsed_fields: Some(Arc::new(ParsedFields::Success(vec![
@@ -494,7 +486,6 @@ mod tests {
 
         let config = FlowLogConfig {
             log_format: "invalid format".to_string(),
-            destination_type: "cloud-watch-logs".to_string(),
             flow_log_id: "fl-123".to_string(),
             tags: std::collections::HashMap::new(),
             parsed_fields: Some(Arc::new(ParsedFields::Error("Parse failed".to_string()))),

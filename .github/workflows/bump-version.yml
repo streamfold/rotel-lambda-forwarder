@@ -102,6 +102,7 @@ jobs:
         run: |
           gh pr create \
             --title "Release: Bump version to ${{ steps.version.outputs.new }}" \
+            --assignee "${{ github.actor }}" \
             --body "This PR bumps the version from ${{ steps.version.outputs.current }} to ${{ steps.version.outputs.new }}.
 
           **Bump type:** ${{ github.event.inputs.bump_type }}

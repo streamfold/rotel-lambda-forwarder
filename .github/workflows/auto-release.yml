@@ -95,8 +95,6 @@ jobs:
 
           # Generate basic release notes
           cat > release_notes.md << EOF
-          ## Release $VERSION
-
           ### What's Changed
 
           EOF

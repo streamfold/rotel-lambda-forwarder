@@ -43,7 +43,7 @@ docker-build:
 	# Extract bootstrap.zip from container
 	@echo "Extracting bootstrap.zip from container..."
 	@CONTAINER_ID=$$(docker create $(DOCKER_IMAGE)) && \
-	mkdir -p tmp/ &&
+	mkdir -p tmp/ && \
 	docker cp $$CONTAINER_ID:/build/target/lambda/rotel-lambda-forwarder/bootstrap.zip ./tmp/$(BOOTSTRAP_ZIP) && \
 	docker rm $$CONTAINER_ID
 

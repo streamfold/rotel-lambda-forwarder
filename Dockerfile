@@ -7,8 +7,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install build dependencies
 RUN dnf install -y \
-    # gcc \
-    # gcc-c++ \
     clang \
     make \
     cmake \
@@ -20,10 +18,8 @@ RUN dnf install -y \
     gzip \
     perl \
     ca-certificates \
-    #    python3-pip \
     zip \
     file \
-    #    python3-devel \
     && dnf clean all
 
 # Install Rust
@@ -47,23 +43,16 @@ COPY rust-toolchain.toml ./
 # Create a dummy main.rs to build dependencies
 RUN mkdir -p src && \
     echo "fn main() {}" > src/main.rs && \
-    cargo build --release; \
+    cargo build --release --target ${TARGET_PLATFORM}.2.34; \
     rm -rf src
 
 # Copy actual source code
 COPY src ./src
 
-#ENV PYO3_PYTHON=/var/lang/bin/python3.13
-
-#ENV LD_LIBRARY_PATH=/lib64
-#ENV CARGO_LAMBDA_COMPILER_EXTRA_ARGS="-L /lib64"
-
-ENV RUSTFLAGS="-L /lib64 -lc"
-# Build the Lambda function
+# Build with a target specifically targeting the >=2.34 glibc, required
+# for linking libpython
 RUN touch src/main.rs && \
-    cargo lambda build --release
-
-RUN find /build/target -name 'bootstrap'
+    cargo lambda build --release --target ${TARGET_PLATFORM}.2.34
 
 # Build the bundled bootstrap, including lib files
 RUN /usr/local/bin/bundle-zip.sh \

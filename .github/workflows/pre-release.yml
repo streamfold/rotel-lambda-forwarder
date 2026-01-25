@@ -77,7 +77,7 @@ jobs:
       - name: upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rotel-lambda-forwarder-${{ matrix.arch }}
+          name: rotel-lambda-forwarder-${{ matrix.arch }}.zip
           path: bootstrap.zip
           if-no-files-found: error
 
@@ -105,7 +105,7 @@ jobs:
       - name: download artifact
         uses: actions/download-artifact@v4
         with:
-          name: rotel-lambda-forwarder-${{ matrix.arch }}
+          name: rotel-lambda-forwarder-${{ matrix.arch }}.zip
           path: ./artifacts
 
       - name: configure AWS credentials

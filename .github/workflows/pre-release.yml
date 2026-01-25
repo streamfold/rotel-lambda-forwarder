@@ -41,14 +41,26 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build in Docker container
-        run: |
-          docker buildx build \
-            --platform ${{ matrix.platform }} \
-            --load \
-            -t rotel-lambda-builder:${{ matrix.arch }} \
-            --build-arg TARGET_PLATFORM=${{ matrix.target }} \
-            --build-arg RUST_VERSION=${{ steps.rust-version.outputs.version }} \
-            .
+        uses: docker/build-push-action@v6
+        with:
+          push: false
+          tags: rotel-lambda-builder:${{ matrix.arch }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            TARGET_PLATFORM=${{ matrix.target }}
+            RUST_VERSION=${{ steps.rust-version.outputs.version }}
+
+      # - name: Build in Docker container
+      #   run: |
+      #     docker buildx build \
+      #       --platform ${{ matrix.platform }} \
+      #       --load \
+      #       -t rotel-lambda-builder:${{ matrix.arch }} \
+      #       --build-arg TARGET_PLATFORM=${{ matrix.target }} \
+      #       --build-arg RUST_VERSION=${{ steps.rust-version.outputs.version }} \
+      #       .
 
       - name: Extract zip file from container
         run: |

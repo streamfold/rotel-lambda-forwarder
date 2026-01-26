@@ -43,7 +43,7 @@ COPY rust-toolchain.toml ./
 # Create a dummy main.rs to build dependencies
 RUN mkdir -p src && \
     echo "fn main() {}" > src/main.rs && \
-    cargo build --release --target ${TARGET_PLATFORM}.2.34; \
+    cargo build --release; \
     rm -rf src
 
 # Copy actual source code

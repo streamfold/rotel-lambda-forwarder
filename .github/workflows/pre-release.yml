@@ -9,7 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   YQ_VERSION: 4.50.1
-  PUBLIC_ECR_IMAGE: "public.ecr.aws/b5b2c8g2/streamfold/rotel-lambda-forwarder"
+  PUBLIC_ECR_IMAGE: "public.ecr.aws/streamfold/streamfold/rotel-lambda-forwarder"
 
 jobs:
   # Build 1: Direct cargo lambda build (produces bootstrap.zip)

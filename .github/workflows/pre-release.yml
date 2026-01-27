@@ -11,8 +11,55 @@ env:
   YQ_VERSION: 4.50.1
 
 jobs:
-  build:
-    name: build - ${{ matrix.arch }}
+  # Build 1: Direct cargo lambda build (produces bootstrap.zip)
+  build-zip:
+    name: build-zip - ${{ matrix.arch }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: update apt cache
+        run: sudo apt-get update
+
+      - name: install protoc
+        run: sudo apt-get install -y protobuf-compiler
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+          rustflags: ""
+
+      - name: install cargo lambda
+        run: |
+          pip3 install cargo-lambda
+
+      - name: build
+        uses: actions-rs/cargo@v1
+        with:
+          command: lambda
+          args: build --release -o zip --target ${{ matrix.target }}
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rotel-lambda-forwarder-zip-${{ matrix.arch }}
+          path: target/lambda/rotel-lambda-forwarder/bootstrap.zip
+          if-no-files-found: error
+
+  # Build 2: Container build with pyo3 feature
+  build-container:
+    name: build-container - ${{ matrix.arch }}
     strategy:
       fail-fast: true
       matrix:
@@ -40,12 +87,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build in Docker container
+      - name: Build container with pyo3
         uses: docker/build-push-action@v6
         with:
           push: false
           load: true
-          tags: rotel-lambda-builder:${{ matrix.arch }}
+          tags: rotel-lambda-forwarder:${{ matrix.arch }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: ${{ matrix.platform }}
@@ -53,37 +100,21 @@ jobs:
             TARGET_PLATFORM=${{ matrix.target }}
             RUST_VERSION=${{ steps.rust-version.outputs.version }}
 
-      # - name: Build in Docker container
-      #   run: |
-      #     docker buildx build \
-      #       --platform ${{ matrix.platform }} \
-      #       --load \
-      #       -t rotel-lambda-builder:${{ matrix.arch }} \
-      #       --build-arg TARGET_PLATFORM=${{ matrix.target }} \
-      #       --build-arg RUST_VERSION=${{ steps.rust-version.outputs.version }} \
-      #       .
-
-      - name: Extract zip file from container
+      - name: Save container image
         run: |
-          # Create a container from the image
-          CONTAINER_ID=$(docker create rotel-lambda-builder:${{ matrix.arch }})
-
-          # Copy the zip file out
-          docker cp ${CONTAINER_ID}:/build/target/lambda/rotel-lambda-forwarder/bootstrap.zip ./bootstrap.zip
-
-          # Clean up the container
-          docker rm ${CONTAINER_ID}
+          docker save rotel-lambda-forwarder:${{ matrix.arch }} | gzip > rotel-lambda-forwarder-${{ matrix.arch }}.tar.gz
 
       - name: upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rotel-lambda-forwarder-${{ matrix.arch }}.zip
-          path: bootstrap.zip
+          name: rotel-lambda-forwarder-container-${{ matrix.arch }}
+          path: rotel-lambda-forwarder-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
 
-  upload:
-    name: upload - ${{ matrix.arch }}
-    needs: build
+  # Upload zip builds to S3
+  upload-zip:
+    name: upload-zip - ${{ matrix.arch }}
+    needs: build-zip
     strategy:
       fail-fast: true
       matrix:
@@ -105,7 +136,7 @@ jobs:
       - name: download artifact
         uses: actions/download-artifact@v4
         with:
-          name: rotel-lambda-forwarder-${{ matrix.arch }}.zip
+          name: rotel-lambda-forwarder-zip-${{ matrix.arch }}
           path: ./artifacts
 
       - name: configure AWS credentials
@@ -127,9 +158,72 @@ jobs:
           aws s3 cp ./artifacts/bootstrap.zip "$S3_PATH" --acl public-read
           echo "Uploaded to $S3_PATH"
 
+  # Upload container images to ECR
+  upload-container:
+    name: upload-container - ${{ matrix.arch }}
+    needs: build-container
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
+          - target: aarch64-unknown-linux-gnu
+            arch: arm64
+    runs-on: ubuntu-latest
+
+    env:
+      ECR_REPOSITORY: rotel-lambda-forwarder-dev
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rotel-lambda-forwarder-container-${{ matrix.arch }}
+          path: ./artifacts
+
+      - name: configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.ECR_FORWARDER_DEV_ARN }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Load and push container image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.ref_name }}-${{ matrix.arch }}
+        run: |
+          # Load the image
+          docker load < ./artifacts/rotel-lambda-forwarder-${{ matrix.arch }}.tar.gz
+
+          # Tag for ECR
+          docker tag rotel-lambda-forwarder:${{ matrix.arch }} $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+          # Push to ECR
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "Pushed to $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+      - name: Push latest tag
+        if: github.ref_name == 'main'
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: latest-${{ matrix.arch }}
+        run: |
+          docker tag rotel-lambda-forwarder:${{ matrix.arch }} $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "Pushed to $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
   upload-cloudformation:
     name: upload cloudformation - ${{ matrix.arch }}
-    needs: build
+    needs: build-zip
     strategy:
       fail-fast: true
       matrix:

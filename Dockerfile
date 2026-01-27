@@ -1,4 +1,4 @@
-FROM public.ecr.aws/lambda/python:3.13
+FROM public.ecr.aws/lambda/python:3.13 AS builder
 
 ARG TARGET_PLATFORM
 ARG RUST_VERSION
@@ -18,7 +18,6 @@ RUN dnf install -y \
     gzip \
     perl \
     ca-certificates \
-    zip \
     file \
     && dnf clean all
 
@@ -32,10 +31,6 @@ RUN pip3 install cargo-lambda
 
 WORKDIR /build
 
-# Copy the bundle-zip script
-COPY scripts/bundle-zip.sh /usr/local/bin/bundle-zip.sh
-RUN chmod +x /usr/local/bin/bundle-zip.sh
-
 # Copy manifests first for better layer caching
 COPY Cargo.toml Cargo.lock ./
 COPY rust-toolchain.toml ./
@@ -43,20 +38,26 @@ COPY rust-toolchain.toml ./
 # Create a dummy main.rs to build dependencies
 RUN mkdir -p src && \
     echo "fn main() {}" > src/main.rs && \
-    cargo build --release; \
+    cargo build --release --features pyo3; \
     rm -rf src
 
 # Copy actual source code
 COPY src ./src
 
-# Build with a target specifically targeting the >=2.34 glibc, required
-# for linking libpython
+# Build with pyo3 feature enabled, targeting >=2.34 glibc required for linking libpython
 RUN touch src/main.rs && \
-    cargo lambda build --release --target ${TARGET_PLATFORM}.2.34
+    cargo lambda build --release --features pyo3 --target ${TARGET_PLATFORM}.2.34
 
-# Build the bundled bootstrap, including lib files
-RUN /usr/local/bin/bundle-zip.sh \
-    /build/target/lambda/rotel-lambda-forwarder/bootstrap \
-    /build/target/lambda/rotel-lambda-forwarder/bootstrap.zip
+FROM public.ecr.aws/lambda/python:3.13
 
-# The zip file will be in target/lambda/rotel-lambda-forwarder/bootstrap.zip
+# Copy the bootstrap binary to the Lambda expected location
+COPY --from=builder /build/target/lambda/rotel-lambda-forwarder/bootstrap ${LAMBDA_TASK_ROOT}/bootstrap
+
+# Ensure the binary is executable
+RUN chmod +x ${LAMBDA_TASK_ROOT}/bootstrap
+
+# Set LD_LIBRARY_PATH to include Python libraries
+# ENV LD_LIBRARY_PATH=/var/lang/lib:/lib64:/usr/lib64:${LD_LIBRARY_PATH}
+
+# Set the ENTRYPOINT to run the bootstrap binary as a custom runtime
+ENTRYPOINT [ "/var/task/bootstrap" ]

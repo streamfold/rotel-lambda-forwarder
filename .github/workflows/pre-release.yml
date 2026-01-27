@@ -75,6 +75,10 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
 
+    permissions:
+      id-token: write
+      contents: read
+
     steps:
       - uses: actions/checkout@v4
 
@@ -85,15 +89,15 @@ jobs:
           echo "version=$RUST_VERSION" >> $GITHUB_OUTPUT
           echo "Rust version: $RUST_VERSION"
 
-      # - name: configure AWS credentials
-      #   uses: aws-actions/configure-aws-credentials@v4
-      #   with:
-      #     role-to-assume: ${{ secrets.PUBLIC_ECR_ROLE_ARN }}
-      #     aws-region: us-east-1
+      - name: configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.PUBLIC_ECR_ROLE_ARN }}
+          aws-region: us-east-1
 
-      # - name: Login to Amazon ECR
-      #   id: login-ecr
-      #   uses: aws-actions/amazon-ecr-login@v2
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Docker metadata
         id: meta
@@ -112,7 +116,8 @@ jobs:
           cache-to: type=gha,mode=max
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          tags: "public.ecr.aws/b5b2c8g2/streamfold/rotel-lambda-forwarder"
+          #tags: "public.ecr.aws/b5b2c8g2/streamfold/rotel-lambda-forwarder"
+          tags: "${{ env.PUBLIC_ECR_IMAGE }}"
           outputs: type=image,push-by-digest=true,name-canonical=true,push=true
           build-args: |
             TARGET_PLATFORM=${{ matrix.target }}

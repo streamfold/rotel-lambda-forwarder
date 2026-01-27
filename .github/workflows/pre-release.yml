@@ -85,15 +85,15 @@ jobs:
           echo "version=$RUST_VERSION" >> $GITHUB_OUTPUT
           echo "Rust version: $RUST_VERSION"
 
-      - name: configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.PUBLIC_ECR_ROLE_ARN }}
-          aws-region: us-east-1
+      # - name: configure AWS credentials
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     role-to-assume: ${{ secrets.PUBLIC_ECR_ROLE_ARN }}
+      #     aws-region: us-east-1
 
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+      # - name: Login to Amazon ECR
+      #   id: login-ecr
+      #   uses: aws-actions/amazon-ecr-login@v2
 
       - name: Docker metadata
         id: meta

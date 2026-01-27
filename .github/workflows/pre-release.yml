@@ -112,7 +112,7 @@ jobs:
           cache-to: type=gha,mode=max
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          tags: ${{ env.PUBLIC_ECR_NAME }}
+          tags: "public.ecr.aws/b5b2c8g2/streamfold/rotel-lambda-forwarder"
           outputs: type=image,push-by-digest=true,name-canonical=true,push=true
           build-args: |
             TARGET_PLATFORM=${{ matrix.target }}

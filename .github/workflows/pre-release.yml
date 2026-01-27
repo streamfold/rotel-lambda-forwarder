@@ -9,6 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   YQ_VERSION: 4.50.1
+  PUBLIC_ECR_IMAGE: "public.ecr.aws/b5b2c8g2/streamfold/rotel-lambda-forwarder"
 
 jobs:
   # Build 1: Direct cargo lambda build (produces bootstrap.zip)
@@ -84,32 +85,99 @@ jobs:
           echo "version=$RUST_VERSION" >> $GITHUB_OUTPUT
           echo "Rust version: $RUST_VERSION"
 
+      - name: configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.PUBLIC_ECR_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.PUBLIC_ECR_IMAGE }}
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build container with pyo3
+      - name: Build container
         uses: docker/build-push-action@v6
         with:
-          push: false
-          load: true
-          tags: rotel-lambda-forwarder:${{ matrix.arch }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ env.PUBLIC_ECR_NAME }}
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
           build-args: |
             TARGET_PLATFORM=${{ matrix.target }}
             RUST_VERSION=${{ steps.rust-version.outputs.version }}
 
-      - name: Save container image
+      - name: Export digest
         run: |
-          docker save rotel-lambda-forwarder:${{ matrix.arch }} | gzip > rotel-lambda-forwarder-${{ matrix.arch }}.tar.gz
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
 
-      - name: upload artifact
+      - name: Upload digest
         uses: actions/upload-artifact@v4
         with:
-          name: rotel-lambda-forwarder-container-${{ matrix.arch }}
-          path: rotel-lambda-forwarder-${{ matrix.arch }}.tar.gz
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
+          retention-days: 1
+
+  merge-containers:
+    runs-on: ubuntu-latest
+    needs:
+      - build-container
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.PUBLIC_ECR_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.PUBLIC_ECR_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.PUBLIC_ECR_IMAGE }}@sha256:%s ' *)
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ${{ env.PUBLIC_ECR_IMAGE }}:${{ steps.meta.outputs.version }}
 
   # Upload zip builds to S3
   upload-zip:
@@ -157,69 +225,6 @@ jobs:
           S3_PATH="s3://${{ env.S3_BUCKET }}/rotel-lambda-forwarder/latest/${{ matrix.arch }}/rotel-lambda-forwarder.zip"
           aws s3 cp ./artifacts/bootstrap.zip "$S3_PATH" --acl public-read
           echo "Uploaded to $S3_PATH"
-
-  # Upload container images to ECR
-  upload-container:
-    name: upload-container - ${{ matrix.arch }}
-    needs: build-container
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            arch: x86_64
-          - target: aarch64-unknown-linux-gnu
-            arch: arm64
-    runs-on: ubuntu-latest
-
-    env:
-      ECR_REPOSITORY: rotel-lambda-forwarder-dev
-
-    permissions:
-      id-token: write
-      contents: read
-
-    steps:
-      - name: download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: rotel-lambda-forwarder-container-${{ matrix.arch }}
-          path: ./artifacts
-
-      - name: configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.ECR_FORWARDER_DEV_ARN }}
-          aws-region: us-east-1
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Load and push container image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.ref_name }}-${{ matrix.arch }}
-        run: |
-          # Load the image
-          docker load < ./artifacts/rotel-lambda-forwarder-${{ matrix.arch }}.tar.gz
-
-          # Tag for ECR
-          docker tag rotel-lambda-forwarder:${{ matrix.arch }} $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-
-          # Push to ECR
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          echo "Pushed to $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-
-      - name: Push latest tag
-        if: github.ref_name == 'main'
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: latest-${{ matrix.arch }}
-        run: |
-          docker tag rotel-lambda-forwarder:${{ matrix.arch }} $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          echo "Pushed to $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
   upload-cloudformation:
     name: upload cloudformation - ${{ matrix.arch }}

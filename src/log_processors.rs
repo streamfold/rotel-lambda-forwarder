@@ -14,8 +14,8 @@ use crate::init_crypto;
 const PROCESSORS_DIR: &str = "/tmp/log_processors";
 
 /// Downloads log processor files from URLs specified in the FORWARDER_OTLP_LOG_PROCESSORS
-/// environment variable and returns a comma-separated list of their paths.
-pub async fn setup_log_processors() -> Result<Option<String>, BoxError> {
+/// environment variable and returns a vector of their paths.
+pub async fn setup_log_processors() -> Result<Option<Vec<String>>, BoxError> {
     let urls_str = match std::env::var("FORWARDER_OTLP_LOG_PROCESSORS") {
         Ok(val) if !val.is_empty() => val,
         _ => {
@@ -57,13 +57,12 @@ pub async fn setup_log_processors() -> Result<Option<String>, BoxError> {
         processor_paths.push(filepath.to_string_lossy().to_string());
     }
 
-    // Return comma-separated list of paths
-    let paths_str = processor_paths.join(",");
+    // Return vector of paths
     info!(
-        paths = %paths_str,
+        paths = ?processor_paths,
         "Log processors setup complete"
     );
-    Ok(Some(paths_str))
+    Ok(Some(processor_paths))
 }
 
 /// Setup the processors directory, clearing it if it exists or creating it otherwise

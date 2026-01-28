@@ -110,11 +110,8 @@ async fn run_forwarder(
     // Setup log processors from environment variable
     match rotel_lambda_forwarder::log_processors::setup_log_processors().await {
         Ok(Some(processor_paths)) => {
-            info!(paths = %processor_paths, "Configuring agent with log processors");
-            // Convert comma-separated string to Vec<String>
-            let processor_vec: Vec<String> =
-                processor_paths.split(',').map(|s| s.to_string()).collect();
-            agent_args.otlp_with_logs_processor = processor_vec;
+            info!(paths = ?processor_paths, "Configuring agent with log processors");
+            agent_args.otlp_with_logs_processor = processor_paths;
         }
         Ok(None) => {
             debug!("No log processors configured");

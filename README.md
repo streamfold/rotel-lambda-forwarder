@@ -12,6 +12,7 @@ _Performance of 12 hours of VPC flow log forwarding to ClickHouse Cloud. Average
 
 - **OpenTelemetry Native**: Transforms all logs to OpenTelemetry format
 - **Multiple Export Targets**: Supports OTLP HTTP/gRPC and other exporters via Rotel
+- **Python Log Processors**: Filter, transform, and enrich logs with Python before exporting
 - **Automatic parsing**: Support for JSON and key=value parsing, with automatic detection
 - **Log stream parser mapping**: Pre-built parser rules for known AWS CW log groups/streams
 - **AWS Resource Attributes**: Automatically enriches logs with AWS Lambda and CloudWatch log group tags
@@ -73,6 +74,39 @@ Launch this stack to export CloudWatch logs to ClickHouse.
 
 [ch-stack-x86-84]: https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?stackName=rotel-lambda-forwarder-clickhouse&templateURL=https://rotel-cloudformation.s3.us-east-1.amazonaws.com/stacks/latest/x86_64/rotel-lambda-forwarder-clickhouse.yaml
 [ch-stack-arm64]: https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?stackName=rotel-lambda-forwarder-clickhouse&templateURL=https://rotel-cloudformation.s3.us-east-1.amazonaws.com/stacks/latest/arm64/rotel-lambda-forwarder-clickhouse.yaml
+
+### Upgrading with CloudFormation
+
+To upgrade the Lambda function to use the latest upstream image, you can update the CloudFormation stack using the **ForceRedeploy** parameter:
+
+#### Method 1: Force Redeploy with Same Tag
+
+If you're using a tag like `latest` and want to pull the newest version:
+
+1. Navigate to your CloudFormation stack in the AWS Console
+2. Click **Update** on the stack
+3. Select **Use current template**
+4. Find the **ForceRedeploy** parameter
+5. Increment the value (e.g., change from `1` to `2`, or use a timestamp like `2024-01-15`)
+6. Complete the stack update
+
+The CloudFormation stack will automatically:
+- Pull the latest image from Amazon ECR Public (`public.ecr.aws/streamfold/rotel-lambda-forwarder`)
+- Copy it to your private ECR repository
+- Redeploy the Lambda function with the updated image
+
+#### Method 2: Upgrade to Specific Version
+
+To upgrade to a specific version tag (e.g., `v1.2.3`):
+
+1. Navigate to your CloudFormation stack in the AWS Console
+2. Click **Update** on the stack
+3. Select **Use current template**
+4. Find the **ForwarderImageTag** parameter
+5. Change the value to the desired version (e.g., from `latest` to `v1.2.3`)
+6. Complete the stack update
+
+**Note:** When using CloudFormation deployment, you don't need to manually pull and push images - the stack handles this automatically through a CodeBuild project.
 
 ### Manual Deployment to AWS
 

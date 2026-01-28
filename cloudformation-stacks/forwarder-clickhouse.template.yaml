@@ -26,7 +26,7 @@ Metadata:
           default: "Container Image Configuration"
         Parameters:
           - ForwarderImageTag
-          - ForceCopyImage
+          - ForceRedeploy
 
     ParameterLabels:
       ClickhouseEndpoint:
@@ -51,7 +51,7 @@ Metadata:
         default: "Function Timeout"
       ForwarderImageTag:
         default: "Forwarder Image Tag"
-      ForceCopyImage:
+      ForceRedeploy:
         default: "Force Image Copy Trigger"
 
 Parameters:
@@ -110,9 +110,9 @@ Parameters:
     Type: String
     Description: Container image tag to deploy from public.ecr.aws/streamfold/rotel-lambda-forwarder
     Default: "latest"
-  ForceCopyImage:
+  ForceRedeploy:
     Type: String
-    Description: Change this value to force a re-copy of the image from public ECR (e.g., increment a number or use a timestamp)
+    Description: Increment to force an upgrade by pulling a new image and redeploying (e.g., increment a number or use a timestamp)
     Default: "1"
 
 Resources:
@@ -366,7 +366,7 @@ Resources:
       ImageTag: !Ref ForwarderImageTag
       LambdaFunctionName: !Ref AWS::StackName
       # This triggers re-execution when either parameter changes
-      Trigger: !Sub "${ForwarderImageTag}-${ForceCopyImage}"
+      Trigger: !Sub "${ForwarderImageTag}-${ForceRedeploy}"
 
   ForwarderBucket:
     Type: AWS::S3::Bucket
@@ -542,6 +542,6 @@ Outputs:
     Value: |
       To pull a new version of the image from public ECR:
       1. Update the stack with a new ForwarderImageTag value (e.g., change from "latest" to "v1.2.3"), OR
-      2. Increment the ForceCopyImage parameter (e.g., change from "1" to "2") to re-pull the same tag, OR
+      2. Increment the ForceRedeploy parameter (e.g., change from "1" to "2") to re-pull the same tag, OR
 
       The CodeBuild project will automatically pull the image from public ECR and push it to your private ECR.

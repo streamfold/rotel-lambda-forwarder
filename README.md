@@ -119,7 +119,7 @@ You can deploy the forwarder manually using either the Docker container (recomme
 The forwarder is available as a container image in [Amazon ECR Public](https://gallery.ecr.aws/streamfold/rotel-lambda-forwarder):
 
 ```
-public.ecr.aws/streamfold/streamfold/rotel-lambda-forwarder:latest
+public.ecr.aws/streamfold/rotel-lambda-forwarder:latest
 ```
 
 ##### Step 1: Copy Image to Your Private ECR
@@ -140,14 +140,14 @@ aws ecr-public get-login-password --region us-east-1 | \
   docker login --username AWS --password-stdin public.ecr.aws
 
 # Pull the image
-docker pull public.ecr.aws/streamfold/streamfold/rotel-lambda-forwarder:latest
+docker pull public.ecr.aws/streamfold/rotel-lambda-forwarder:latest
 
 # Login to your private ECR
 aws ecr get-login-password --region YOUR_REGION | \
   docker login --username AWS --password-stdin YOUR_ACCOUNT_ID.dkr.ecr.YOUR_REGION.amazonaws.com
 
 # Tag the image for your private registry
-docker tag public.ecr.aws/streamfold/streamfold/rotel-lambda-forwarder:latest \
+docker tag public.ecr.aws/streamfold/rotel-lambda-forwarder:latest \
   YOUR_ACCOUNT_ID.dkr.ecr.YOUR_REGION.amazonaws.com/rotel-lambda-forwarder:latest
 
 # Push to your private ECR
@@ -270,10 +270,10 @@ To update the function with a new image version:
 
 ```bash
 # Pull new image from ECR Public
-docker pull public.ecr.aws/streamfold/streamfold/rotel-lambda-forwarder:v1.2.3
+docker pull public.ecr.aws/streamfold/rotel-lambda-forwarder:v1.2.3
 
 # Tag and push to your private ECR
-docker tag public.ecr.aws/streamfold/streamfold/rotel-lambda-forwarder:v1.2.3 \
+docker tag public.ecr.aws/streamfold/rotel-lambda-forwarder:v1.2.3 \
   YOUR_ACCOUNT_ID.dkr.ecr.YOUR_REGION.amazonaws.com/rotel-lambda-forwarder:v1.2.3
 
 docker push YOUR_ACCOUNT_ID.dkr.ecr.YOUR_REGION.amazonaws.com/rotel-lambda-forwarder:v1.2.3

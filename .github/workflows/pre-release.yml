@@ -119,7 +119,6 @@ jobs:
           cache-to: type=gha,mode=max
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          #tags: "public.ecr.aws/b5b2c8g2/streamfold/rotel-lambda-forwarder"
           tags: "${{ env.PUBLIC_ECR_IMAGE }}"
           outputs: type=image,push-by-digest=true,name-canonical=true,push=true
           build-args: |
@@ -142,8 +141,14 @@ jobs:
 
   merge-containers:
     runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
     needs:
       - build-container
+
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4

@@ -16,16 +16,18 @@ Metadata:
           default: "Processing Configuration"
         Parameters:
           - ResourceAttributes
+          - LogProcessors
       - Label:
           default: "Function Configuration"
         Parameters:
           - FunctionMemorySize
           - FunctionTimeout
       - Label:
-          default: "Artifact Configuration (Keep defaults)"
+          default: "Container Image Configuration"
         Parameters:
-          - S3Bucket
-          - S3Key
+          - ForwarderImageTag
+          - ForceCopyImage
+
     ParameterLabels:
       ClickhouseEndpoint:
         default: "ClickHouse Endpoint"
@@ -41,14 +43,16 @@ Metadata:
         default: "ClickHouse Enable JSON"
       ResourceAttributes:
         default: "Resource Attributes"
+      LogProcessors:
+        default: "Log Processors"
       FunctionMemorySize:
         default: "Function Memory Size"
       FunctionTimeout:
         default: "Function Timeout"
-      S3Bucket:
-        default: "S3 Bucket"
-      S3Key:
-        default: "S3 Key"
+      ForwarderImageTag:
+        default: "Forwarder Image Tag"
+      ForceCopyImage:
+        default: "Force Image Copy Trigger"
 
 Parameters:
   ClickhouseEndpoint:
@@ -85,7 +89,11 @@ Parameters:
   ResourceAttributes:
     Type: String
     Description: Resource attributes to add to all telemetry data, e.g., service.name=my-service,deployment.environment=production. Leave empty for no additional attributes.
-    Default: "aws.function.name=rotel-lambda-forwarder"
+    Default: ""
+  LogProcessors:
+    Type: String
+    Description: "Comma-separated list of URIs of log processors to load on startup. (Supports: http://, https://, or s3:// URIs)"
+    Default: ""
   FunctionMemorySize:
     Type: Number
     Description: Memory size (in MB) allocated to the Lambda function.
@@ -98,15 +106,269 @@ Parameters:
     Default: 30
     MinValue: 15
     MaxValue: 900
-  S3Bucket:
+  ForwarderImageTag:
     Type: String
-    Description: S3 bucket containing Rotel Lambda Forwarder.
-    Default: "" # updated on release
-  S3Key:
+    Description: Container image tag to deploy from public.ecr.aws/streamfold/rotel-lambda-forwarder
+    Default: "latest"
+  ForceCopyImage:
     Type: String
-    Description: S3 key for the Rotel Lambda Forwarder.
-    Default: "" # updated on release
+    Description: Change this value to force a re-copy of the image from public ECR (e.g., increment a number or use a timestamp)
+    Default: "1"
+
 Resources:
+  # Private ECR Repository for the forwarder image
+  ForwarderECRRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    Properties:
+      RepositoryName: !Sub "rotel-lambda-forwarder-${AWS::StackName}"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      Tags:
+        - Key: "PartOf"
+          Value: !Ref AWS::StackName
+        - Key: "Platform"
+          Value: "Rotel"
+
+  # CodeBuild project to copy image from public ECR to private ECR
+  ImageCopyProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${AWS::StackName}-image-copy"
+      Description: Copies container image from public ECR to private ECR
+      ServiceRole: !GetAtt ImageCopyRole.Arn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: SOURCE_IMAGE
+            Value: !Sub "public.ecr.aws/streamfold/streamfold/rotel-lambda-forwarder:${ForwarderImageTag}"
+          - Name: TARGET_IMAGE
+            Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ForwarderECRRepository}:${ForwarderImageTag}"
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            pre_build:
+              commands:
+                - echo "Logging in to Amazon ECR in region $AWS_DEFAULT_REGION..."
+                - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+            build:
+              commands:
+                - echo "Pulling image from public ECR ($SOURCE_IMAGE)..."
+                - docker pull $SOURCE_IMAGE
+                - echo "Tagging image for private ECR..."
+                - docker tag $SOURCE_IMAGE $TARGET_IMAGE
+                - echo "Pushing image to private ECR ($TARGET_IMAGE)..."
+                - docker push $TARGET_IMAGE
+            post_build:
+              commands:
+                - echo "Image copy completed successfully"
+      Tags:
+        - Key: "PartOf"
+          Value: !Ref AWS::StackName
+        - Key: "Platform"
+          Value: "Rotel"
+
+  # IAM Role for CodeBuild
+  ImageCopyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+      Policies:
+        - PolicyName: CodeBuildLogsPolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AWS::StackName}-image-copy"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AWS::StackName}-image-copy:*"
+
+      Tags:
+        - Key: "PartOf"
+          Value: !Ref AWS::StackName
+        - Key: "Platform"
+          Value: "Rotel"
+
+  # Lambda function for Custom Resource
+  ImageCopyCustomResourceFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-image-copy-cr"
+      Description: !Sub "Lambda function to trigger CodeBuild to pull ECR image for stack: ${AWS::StackName}"
+      Runtime: python3.14
+      Handler: index.handler
+      Role: !GetAtt ImageCopyCustomResourceRole.Arn
+      Timeout: 900
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+          import time
+
+          codebuild = boto3.client('codebuild')
+          lambda_client = boto3.client('lambda')
+
+          def handler(event, context):
+              print(f"Received event: {json.dumps(event)}")
+
+              response_data = {}
+              physical_resource_id = event.get('PhysicalResourceId', 'ImageCopyBuild')
+
+              try:
+                  request_type = event['RequestType']
+                  project_name = event['ResourceProperties']['ProjectName']
+                  lambda_function_name = event['ResourceProperties'].get('LambdaFunctionName')
+                  image_tag = event['ResourceProperties'].get('ImageTag', 'latest')
+
+                  if request_type in ['Create', 'Update']:
+                      # Start the CodeBuild project
+                      print(f"Starting CodeBuild project: {project_name}")
+                      response_data['Trigger'] = trigger_value
+                      build_response = codebuild.start_build(projectName=project_name)
+                      build_id = build_response['build']['id']
+                      print(f"Build started with ID: {build_id}")
+
+                      # Wait for build to complete
+                      print("Waiting for build to complete...")
+                      while True:
+                          build_info = codebuild.batch_get_builds(ids=[build_id])['builds'][0]
+                          build_status = build_info['buildStatus']
+                          print(f"Build status: {build_status}")
+
+                          if build_status == 'SUCCEEDED':
+                              print("Build succeeded!")
+                              response_data['BuildId'] = build_id
+                              response_data['BuildStatus'] = build_status
+
+                              # If this is an Update and Lambda function exists, force Lambda to update
+                              if request_type == 'Update' and lambda_function_name:
+                                  try:
+                                      print(f"Forcing Lambda function update: {lambda_function_name}")
+
+                                      # Get Lambda function details to determine the image URI
+                                      function_details = lambda_client.get_function(FunctionName=lambda_function_name)
+                                      current_image_uri = function_details['Code']['ImageUri']
+                                      print(f"Current ImageUri: {current_image_uri}")
+
+                                      # Construct new image URI with the same repository but potentially new tag
+                                      # The image should already be copied to ECR by CodeBuild
+                                      image_uri_base = current_image_uri.rsplit(':', 1)[0]
+                                      new_image_uri = f"{image_uri_base}:{image_tag}"
+                                      print(f"New ImageUri: {new_image_uri}")
+
+                                      # Update the Lambda function to force it to pull the new image
+                                      lambda_client.update_function_code(
+                                          FunctionName=lambda_function_name,
+                                          ImageUri=new_image_uri,
+                                          Publish=True
+                                      )
+                                      print("Lambda function update triggered successfully")
+                                      response_data['LambdaUpdated'] = 'true'
+                                      response_data['NewImageUri'] = new_image_uri
+                                  except Exception as lambda_error:
+                                      print(f"Warning: Could not update Lambda function: {str(lambda_error)}")
+                                      # Don't fail the whole operation if Lambda update fails
+                                      response_data['LambdaUpdated'] = 'false'
+                                      response_data['LambdaUpdateError'] = str(lambda_error)
+
+                              cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data, physical_resource_id)
+                              return
+                          elif build_status in ['FAILED', 'FAULT', 'TIMED_OUT', 'STOPPED']:
+                              print(f"Build failed with status: {build_status}")
+                              cfnresponse.send(event, context, cfnresponse.FAILED,
+                                             {'Error': f'Build failed with status: {build_status}'},
+                                             physical_resource_id)
+                              return
+
+                          time.sleep(10)
+
+                  elif request_type == 'Delete':
+                      # Nothing to do on delete
+                      print("Delete request - no action needed")
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data, physical_resource_id)
+                      return
+
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED,
+                                 {'Error': str(e)}, physical_resource_id)
+      Tags:
+        - Key: "PartOf"
+          Value: !Ref AWS::StackName
+        - Key: "Platform"
+          Value: "Rotel"
+
+  # IAM Role for Custom Resource Lambda
+  ImageCopyCustomResourceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CodeBuildStartPolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                Resource: !GetAtt ImageCopyProject.Arn
+        - PolicyName: LambdaUpdatePolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:UpdateFunctionCode
+                  - lambda:GetFunction
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}"
+      Tags:
+        - Key: "PartOf"
+          Value: !Ref AWS::StackName
+        - Key: "Platform"
+          Value: "Rotel"
+
+  # Custom Resource to trigger image copy
+  ImageCopyCustomResource:
+    Type: Custom::ImageCopy
+    DependsOn:
+      - ForwarderECRRepository
+      - ImageCopyProject
+    Properties:
+      ServiceToken: !GetAtt ImageCopyCustomResourceFunction.Arn
+      ProjectName: !Ref ImageCopyProject
+      ImageTag: !Ref ForwarderImageTag
+      LambdaFunctionName: !Ref AWS::StackName
+      # This triggers re-execution when either parameter changes
+      Trigger: !Sub "${ForwarderImageTag}-${ForceCopyImage}"
+
   ForwarderBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
@@ -128,6 +390,7 @@ Resources:
           Value: !Ref AWS::StackName
         - Key: "Platform"
           Value: "Rotel"
+
   ForwarderLogGroup:
     Type: "AWS::Logs::LogGroup"
     DeletionPolicy: Delete
@@ -139,6 +402,7 @@ Resources:
           Value: !Ref AWS::StackName
         - Key: "Platform"
           Value: "Rotel"
+
   ForwarderRole:
     Type: AWS::IAM::Role
     Properties:
@@ -157,6 +421,7 @@ Resources:
           Value: "RotelLambdaForwarder"
         - Key: "Platform"
           Value: "Rotel"
+
   ForwarderPolicy:
     Type: AWS::IAM::Policy
     Properties:
@@ -167,6 +432,12 @@ Resources:
               - logs:PutLogEvents
             Effect: Allow
             Resource: !GetAtt ForwarderLogGroup.Arn
+          - Action:
+              - ecr:GetDownloadUrlForLayer
+              - ecr:BatchGetImage
+              - ecr:BatchCheckLayerAvailability
+            Effect: Allow
+            Resource: !GetAtt ForwarderECRRepository.Arn
           - Action:
               - lambda:AddPermission
               - lambda:RemovePermission
@@ -193,15 +464,17 @@ Resources:
       PolicyName: !Sub "${AWS::StackName}-forwarder-lambda-policy"
       Roles:
         - !Ref "ForwarderRole"
+
   ForwarderLambda:
     Type: AWS::Lambda::Function
+    DependsOn:
+      - ImageCopyCustomResource
     Properties:
       FunctionName: !Ref AWS::StackName
-      Runtime: provided.al2023
-      Handler: bootstrap
+      Description: "Rotel Lambda Forwarder - Convert and forward CloudWatch logs as OTLP"
+      PackageType: Image
       Code:
-        S3Bucket: !Ref S3Bucket
-        S3Key: !Ref S3Key
+        ImageUri: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ForwarderECRRepository}:${ForwarderImageTag}"
       Role: !GetAtt
         - ForwarderRole
         - Arn
@@ -230,6 +503,8 @@ Resources:
           ROTEL_OTEL_RESOURCE_ATTRIBUTES: !Ref "ResourceAttributes"
           ROTEL_EXPORTER_RETRY_MAX_ELAPSED_TIME: !Sub "${FunctionTimeout}s"
           FORWARDER_S3_BUCKET: !Ref ForwarderBucket
+          FORWARDER_OTLP_LOG_PROCESSORS: !Ref LogProcessors
+
   ForwarderLambdaPermission:
     Type: AWS::Lambda::Permission
     DependsOn:
@@ -240,6 +515,7 @@ Resources:
       Principal: !Sub "logs.${AWS::Region}.amazonaws.com"
       SourceAccount: !Ref "AWS::AccountId"
       SourceArn: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*:*"
+
 Outputs:
   ForwarderLambdaARN:
     Description: The ARN of the created Forwarder Lambda
@@ -250,6 +526,9 @@ Outputs:
   ForwarderBucketName:
     Description: The name of the S3 bucket used for tag caching
     Value: !Ref ForwarderBucket
+  ForwarderECRRepositoryUri:
+    Description: The URI of the private ECR repository
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ForwarderECRRepository}"
   SetupInstructions:
     Description: Instructions for setting up CloudWatch Logs subscription filters
     Value: !Sub |
@@ -259,3 +538,11 @@ Outputs:
         --filter-name forward-to-rotel \
         --filter-pattern "" \
         --destination-arn ${ForwarderLambda.Arn}
+  ImageUpdateInstructions:
+    Description: How to update the container image
+    Value: |
+      To pull a new version of the image from public ECR:
+      1. Update the stack with a new ForwarderImageTag value (e.g., change from "latest" to "v1.2.3"), OR
+      2. Increment the ForceCopyImage parameter (e.g., change from "1" to "2") to re-pull the same tag, OR
+
+      The CodeBuild project will automatically pull the image from public ECR and push it to your private ECR.

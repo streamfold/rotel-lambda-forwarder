@@ -578,6 +578,29 @@ be set to the function's maximum timeout.
 ROTEL_EXPORTER_RETRY_MAX_ELAPSED_TIME=30s
 ```
 
+### OTLP Log Processors from S3
+
+You can configure OTLP log processors to transform or filter logs before they are exported. The Lambda Forwarder supports loading processor configurations from any HTTP endpoint or S3 bucket.
+
+See the Python [Processor SDK](https://rotel.dev/docs/category/processor-sdk) for how to construct these processors.
+
+Set the `FORWARDER_OTLP_LOG_PROCESSORS` environment variable of the Lambda Forwarder function, or through
+the `LogProcessors` CloudFormation parameter.
+
+```bash
+FORWARDER_OTLP_LOG_PROCESSORS="https://gist.githubusercontent.com/mheffner/4d4aaa0f3f7ffc620fb740763f4e0098/raw/parse_vpc_logs.py,s3://my-bucket-name/processors/filter-ecs-logs.py"
+```
+
+**Important**: If you load processors from an S3 bucket, make sure the Lambda environment has IAM permissions
+to read from the bucket.
+
+**Features**:
+- Multiple URIs can be specified as a comma-separated list (supports: http, https, or s3)
+- Processors are downloaded to `/tmp/log_processors/`
+- Processors are executed in the order specified in `FORWARDER_OTLP_LOG_PROCESSORS`
+
+**Example**: See [examples/processors/parse_vpc_logs.py](examples/processors/parse_vpc_logs.py) for an example of filtering VPC logs that indicate a REJECTED flow.
+
 ## Setting Up CloudWatch Logs Subscription
 
 To forward logs from CloudWatch Logs to the Lambda function, create a subscription filter:

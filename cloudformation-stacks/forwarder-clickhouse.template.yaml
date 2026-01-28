@@ -146,7 +146,7 @@ Resources:
         PrivilegedMode: true
         EnvironmentVariables:
           - Name: SOURCE_IMAGE
-            Value: !Sub "public.ecr.aws/streamfold/streamfold/rotel-lambda-forwarder:${ForwarderImageTag}"
+            Value: !Sub "public.ecr.aws/streamfold/rotel-lambda-forwarder:${ForwarderImageTag}"
           - Name: TARGET_IMAGE
             Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ForwarderECRRepository}:${ForwarderImageTag}"
           - Name: AWS_DEFAULT_REGION

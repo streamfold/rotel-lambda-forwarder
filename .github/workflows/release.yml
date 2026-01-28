@@ -233,26 +233,26 @@ jobs:
           path: ./artifacts
       
       - name: set env for push
-        if: github.event_name == "push"
+        if: github.event_name == 'push'
         run: |
           echo "ref_name=${{ github.ref_name }}" >> $GITHUB_ENV
           echo "artifact_bucket_name=${{ env.ARTIFACT_S3_BUCKET_DEV }}" >> $GITHUB_ENV
 
       - name: set env for release
-        if: github.event_name == "release"
+        if: github.event_name == 'release'
         run: |
           echo "bucket_name=${{ github.event.release.tag_name }}" >> $GITHUB_ENV
           echo "artifact_bucket_name=${{ env.ARTIFACT_S3_BUCKET }}" >> $GITHUB_ENV
 
       - name: configure AWS credentials (push)
-        if: github.event_name == "push"
+        if: github.event_name == 'push'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.S3_FORWARDER_DEV_ARN }}
           aws-region: us-east-1
 
       - name: configure AWS credentials (release)
-        if: github.event_name == "release"
+        if: github.event_name == 'release'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.S3_FORWARDER_ARN }}
@@ -265,7 +265,7 @@ jobs:
           echo "Uploaded to $S3_PATH"
 
       - name: upload to S3 latest
-        if: github.ref_name == 'main' || github.event_name == "release"
+        if: github.ref_name == 'main' || github.event_name == 'release'
         run: |
           S3_PATH="s3://${{ env.artifact_bucket_name }}/rotel-lambda-forwarder/latest/${{ matrix.arch }}/rotel-lambda-forwarder.zip"
           aws s3 cp ./artifacts/bootstrap.zip "$S3_PATH" --acl public-read
@@ -304,14 +304,14 @@ jobs:
           mkdir -p dist/versioned
       
       - name: set env for push
-        if: github.event_name == "push"
+        if: github.event_name == 'push'
         run: |
           echo "ref_name=${{ github.ref_name }}" >> $GITHUB_ENV
           echo "cf_bucket_name=${{ env.CF_S3_BUCKET_DEV }}" >> $GITHUB_ENV
           echo "artifact_bucket_name=${{ env.ARTIFACT_S3_BUCKET_DEV }}" >> $GITHUB_ENV
 
       - name: set env for release
-        if: github.event_name == "release"
+        if: github.event_name == 'release'
         run: |
           echo "bucket_name=${{ github.event.release.tag_name }}" >> $GITHUB_ENV
           echo "cf_bucket_name=${{ env.CF_S3_BUCKET }}" >> $GITHUB_ENV
@@ -336,14 +336,14 @@ jobs:
             ./cloudformation-stacks/forwarder-clickhouse.template.yaml > dist/versioned/forwarder-clickhouse.yaml
 
       - name: configure AWS credentials (push)
-        if: github.event_name == "push"
+        if: github.event_name == 'push'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.S3_CLOUDFORMATION_DEV_ARN }}
           aws-region: us-east-1
 
       - name: configure AWS credentials (release)
-        if: github.event_name == "release"
+        if: github.event_name == 'release'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.S3_CLOUDFORMATION_ARN }}
@@ -357,7 +357,7 @@ jobs:
           aws s3 cp ./dist/versioned/forwarder-clickhouse.yaml "${S3_PATH_BASE}/rotel-lambda-forwarder-clickhouse.yaml" --acl public-read
 
       - name: upload to S3 latest
-        if: github.ref_name == 'main' || github.event_name == "release"
+        if: github.ref_name == 'main' || github.event_name == 'release'
         run: |
           S3_PATH_BASE="s3://${{ env.cf_bucket_name }}/stacks/latest/${{ matrix.arch }}"
 

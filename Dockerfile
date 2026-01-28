@@ -1,4 +1,4 @@
-FROM public.ecr.aws/lambda/python:3.13 AS builder
+FROM public.ecr.aws/lambda/python:3.14 AS builder
 
 ARG TARGET_PLATFORM
 ARG RUST_VERSION
@@ -48,16 +48,13 @@ COPY src ./src
 RUN touch src/main.rs && \
     cargo lambda build --release --features pyo3 --target ${TARGET_PLATFORM}.2.34
 
-FROM public.ecr.aws/lambda/python:3.13
+FROM public.ecr.aws/lambda/python:3.14
 
 # Copy the bootstrap binary to the Lambda expected location
 COPY --from=builder /build/target/lambda/rotel-lambda-forwarder/bootstrap ${LAMBDA_TASK_ROOT}/bootstrap
 
 # Ensure the binary is executable
 RUN chmod +x ${LAMBDA_TASK_ROOT}/bootstrap
-
-# Set LD_LIBRARY_PATH to include Python libraries
-# ENV LD_LIBRARY_PATH=/var/lang/lib:/lib64:/usr/lib64:${LD_LIBRARY_PATH}
 
 # Set the ENTRYPOINT to run the bootstrap binary as a custom runtime
 ENTRYPOINT [ "/var/task/bootstrap" ]

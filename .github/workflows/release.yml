@@ -1,16 +1,29 @@
+# Build and release the rotel-lambda-forwarder.
+#
+# This runs on two different events:
+#  1. Push to main branch (or others as configured): the artifacts and CF files are uploaded to dev S3 buckets, image tagged as main
+#  2. Release: artifacts and CF files are uploaded to main S3 buckets, images tagged with versions and latest
+# 
+# 
 name: Release
 
 on:
+  push:
+    branches:
+      - main
+      - python-processor
   release:
     types: [created]
 
 env:
   CARGO_TERM_COLOR: always
   YQ_VERSION: 4.50.1
+  PUBLIC_ECR_IMAGE: "public.ecr.aws/streamfold/rotel-lambda-forwarder"
 
 jobs:
-  build:
-    name: build - ${{ matrix.arch }}
+  # Build 1: Direct cargo lambda build (produces bootstrap.zip)
+  build-zip:
+    name: build-zip - ${{ matrix.arch }}
     strategy:
       fail-fast: true
       matrix:
@@ -18,11 +31,9 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             arch: x86_64
             runner: ubuntu-latest
-            os: ubuntu
           - target: aarch64-unknown-linux-gnu
             arch: arm64
             runner: ubuntu-24.04-arm
-            os: ubuntu
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -52,13 +63,150 @@ jobs:
       - name: upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rotel-lambda-forwarder-${{ matrix.arch }}
+          name: rotel-lambda-forwarder-zip-${{ matrix.arch }}
           path: target/lambda/rotel-lambda-forwarder/bootstrap.zip
           if-no-files-found: error
 
-  upload:
-    name: upload - ${{ matrix.arch }}
-    needs: build
+  # Build 2: Container build with pyo3 feature
+  build-container:
+    name: build-container - ${{ matrix.arch }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse Rust version from rust-toolchain.toml
+        id: rust-version
+        run: |
+          RUST_VERSION=$(grep '^channel = ' rust-toolchain.toml | sed 's/channel = "\(.*\)"/\1/')
+          echo "version=$RUST_VERSION" >> $GITHUB_OUTPUT
+          echo "Rust version: $RUST_VERSION"
+
+      - name: configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.PUBLIC_ECR_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.PUBLIC_ECR_IMAGE }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build container
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: "${{ env.PUBLIC_ECR_IMAGE }}"
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            TARGET_PLATFORM=${{ matrix.target }}
+            RUST_VERSION=${{ steps.rust-version.outputs.version }}
+
+      - name: Export digest
+        run: |
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge-containers:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    needs:
+      - build-container
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.PUBLIC_ECR_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.PUBLIC_ECR_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.PUBLIC_ECR_IMAGE }}@sha256:%s ' *)
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ${{ env.PUBLIC_ECR_IMAGE }}:${{ steps.meta.outputs.version }}
+
+  # Upload zip builds to S3
+  upload-zip:
+    name: upload-zip - ${{ matrix.arch }}
+    needs: build-zip
     strategy:
       fail-fast: true
       matrix:
@@ -70,7 +218,8 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      S3_BUCKET: rotel-lambda-forwarder
+      ARTIFACT_S3_BUCKET_DEV: rotel-lambda-forwarder-dev
+      ARTIFACT_S3_BUCKET: rotel-lambda-forwarder-dev
 
     permissions:
       id-token: write
@@ -80,10 +229,30 @@ jobs:
       - name: download artifact
         uses: actions/download-artifact@v4
         with:
-          name: rotel-lambda-forwarder-${{ matrix.arch }}
+          name: rotel-lambda-forwarder-zip-${{ matrix.arch }}
           path: ./artifacts
+      
+      - name: set env for push
+        if: github.event_name == "push"
+        run: |
+          echo "ref_name=${{ github.ref_name }}" >> $GITHUB_ENV
+          echo "artifact_bucket_name=${{ env.ARTIFACT_S3_BUCKET_DEV }}" >> $GITHUB_ENV
 
-      - name: configure AWS credentials
+      - name: set env for release
+        if: github.event_name == "release"
+        run: |
+          echo "bucket_name=${{ github.event.release.tag_name }}" >> $GITHUB_ENV
+          echo "artifact_bucket_name=${{ env.ARTIFACT_S3_BUCKET }}" >> $GITHUB_ENV
+
+      - name: configure AWS credentials (push)
+        if: github.event_name == "push"
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.S3_FORWARDER_DEV_ARN }}
+          aws-region: us-east-1
+
+      - name: configure AWS credentials (release)
+        if: github.event_name == "release"
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.S3_FORWARDER_ARN }}
@@ -91,47 +260,20 @@ jobs:
 
       - name: upload to S3 by version
         run: |
-          TAG_NAME="${{ github.event.release.tag_name }}"
-          S3_PATH="s3://${{ env.S3_BUCKET }}/rotel-lambda-forwarder/${TAG_NAME}/${{ matrix.arch }}/rotel-lambda-forwarder.zip"
+          S3_PATH="s3://${{ env.artifact_bucket_name }}/rotel-lambda-forwarder/${{ env.ref_name }}/${{ matrix.arch }}/rotel-lambda-forwarder.zip"
           aws s3 cp ./artifacts/bootstrap.zip "$S3_PATH" --acl public-read
           echo "Uploaded to $S3_PATH"
 
       - name: upload to S3 latest
+        if: github.ref_name == 'main' || github.event_name == "release"
         run: |
-          S3_PATH="s3://${{ env.S3_BUCKET }}/rotel-lambda-forwarder/latest/${{ matrix.arch }}/rotel-lambda-forwarder.zip"
+          S3_PATH="s3://${{ env.artifact_bucket_name }}/rotel-lambda-forwarder/latest/${{ matrix.arch }}/rotel-lambda-forwarder.zip"
           aws s3 cp ./artifacts/bootstrap.zip "$S3_PATH" --acl public-read
           echo "Uploaded to $S3_PATH"
 
-  upload-gh-release:
-    name: upload GH release - ${{ matrix.arch }}
-    needs: build
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            arch: x86_64
-          - target: aarch64-unknown-linux-gnu
-            arch: arm64
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: rotel-lambda-forwarder-${{ matrix.arch }}
-          path: ./artifacts
-
-      - name: upload to GH release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          id=$(gh api -H "Accept: application/vnd.github+json" /repos/${{ github.repository }}/releases/tags/${{ github.event.release.tag_name }} --jq .id)
-          curl --fail-with-body -sS  -X POST --data-binary @"./artifacts/bootstrap.zip" -H 'Content-Type: application/octet-stream' -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "https://uploads.github.com/repos/${{ github.repository }}/releases/$id/assets?name=rotel-lambda-forwarder-${{ github.event.release.tag_name }}_${{ matrix.arch }}.zip"
-
   upload-cloudformation:
     name: upload cloudformation - ${{ matrix.arch }}
-    needs: build
+    needs: build-zip
     strategy:
       fail-fast: true
       matrix:
@@ -144,8 +286,10 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      ARTIFACT_S3_BUCKET: rotel-lambda-forwarder
-      S3_BUCKET: rotel-cloudformation
+      ARTIFACT_S3_BUCKET_DEV: rotel-lambda-forwarder-dev
+      ARTIFACT_S3_BUCKET: rotel-lambda-forwarder-dev
+      CF_S3_BUCKET_DEV: rotel-cloudformation-dev
+      CF_S3_BUCKET: rotel-cloudformation
 
     permissions:
       id-token: write
@@ -158,30 +302,48 @@ jobs:
       - run: |
           mkdir -p dist/latest
           mkdir -p dist/versioned
+      
+      - name: set env for push
+        if: github.event_name == "push"
+        run: |
+          echo "ref_name=${{ github.ref_name }}" >> $GITHUB_ENV
+          echo "cf_bucket_name=${{ env.CF_S3_BUCKET_DEV }}" >> $GITHUB_ENV
+          echo "artifact_bucket_name=${{ env.ARTIFACT_S3_BUCKET_DEV }}" >> $GITHUB_ENV
+
+      - name: set env for release
+        if: github.event_name == "release"
+        run: |
+          echo "bucket_name=${{ github.event.release.tag_name }}" >> $GITHUB_ENV
+          echo "cf_bucket_name=${{ env.CF_S3_BUCKET }}" >> $GITHUB_ENV
+          echo "artifact_bucket_name=${{ env.ARTIFACT_S3_BUCKET }}" >> $GITHUB_ENV
 
       - run: |
-          yq '.Parameters.S3Bucket.Default = "${{ env.ARTIFACT_S3_BUCKET }}" |
-            .Resources.ForwarderLambda.Properties.Architectures = ["${{ matrix.arch }}"] |
-            .Parameters.S3Key.Default = "rotel-lambda-forwarder/latest/${{ matrix.arch }}/rotel-lambda-forwarder.zip"' \
+          yq '.Parameters.ForwarderImageTag.Default = "latest" |
+            .Resources.ForwarderLambda.Properties.Architectures = ["${{ matrix.arch }}"]' \
             ./cloudformation-stacks/forwarder-otlp.template.yaml > dist/latest/forwarder-otlp.yaml
 
-          yq '.Parameters.S3Bucket.Default = "${{ env.ARTIFACT_S3_BUCKET }}" |
-            .Resources.ForwarderLambda.Properties.Architectures = ["${{ matrix.arch }}"] |
-            .Parameters.S3Key.Default = "rotel-lambda-forwarder/latest/${{ matrix.arch }}/rotel-lambda-forwarder.zip"' \
+          yq '.Parameters.ForwarderImageTag.Default = "latest" |
+            .Resources.ForwarderLambda.Properties.Architectures = ["${{ matrix.arch }}"]' \
             ./cloudformation-stacks/forwarder-clickhouse.template.yaml > dist/latest/forwarder-clickhouse.yaml
 
       - run: |
-          yq '.Parameters.S3Bucket.Default = "${{ env.ARTIFACT_S3_BUCKET }}" |
-            .Resources.ForwarderLambda.Properties.Architectures = ["${{ matrix.arch }}"] |
-            .Parameters.S3Key.Default = "rotel-lambda-forwarder/${{ github.event.release.tag_name }}/${{ matrix.arch }}/rotel-lambda-forwarder.zip"' \
+          yq '.Parameters.ForwarderImageTag.Default = "${{ env.ref_name }}" |
+            .Resources.ForwarderLambda.Properties.Architectures = ["${{ matrix.arch }}"]' \
             ./cloudformation-stacks/forwarder-otlp.template.yaml > dist/versioned/forwarder-otlp.yaml
 
-          yq '.Parameters.S3Bucket.Default = "${{ env.ARTIFACT_S3_BUCKET }}" |
-            .Resources.ForwarderLambda.Properties.Architectures = ["${{ matrix.arch }}"] |
-            .Parameters.S3Key.Default = "rotel-lambda-forwarder/${{ github.event.release.tag_name }}/${{ matrix.arch }}/rotel-lambda-forwarder.zip"' \
+          yq '.Parameters.ForwarderImageTag.Default = "${{ env.ref_name }}" |
+            .Resources.ForwarderLambda.Properties.Architectures = ["${{ matrix.arch }}"]' \
             ./cloudformation-stacks/forwarder-clickhouse.template.yaml > dist/versioned/forwarder-clickhouse.yaml
 
-      - name: configure AWS credentials
+      - name: configure AWS credentials (push)
+        if: github.event_name == "push"
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.S3_CLOUDFORMATION_DEV_ARN }}
+          aws-region: us-east-1
+
+      - name: configure AWS credentials (release)
+        if: github.event_name == "release"
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.S3_CLOUDFORMATION_ARN }}
@@ -189,15 +351,15 @@ jobs:
 
       - name: upload to S3 by version
         run: |
-          TAG_NAME="${{ github.event.release.tag_name }}"
-          S3_PATH_BASE="s3://${{ env.S3_BUCKET }}/stacks/${TAG_NAME}/${{ matrix.arch }}"
+          S3_PATH_BASE="s3://${{ env.cf_bucket_name }}/stacks/${{ github.ref_name }}/${{ matrix.arch }}"
 
           aws s3 cp ./dist/versioned/forwarder-otlp.yaml "${S3_PATH_BASE}/rotel-lambda-forwarder-otlp.yaml" --acl public-read
           aws s3 cp ./dist/versioned/forwarder-clickhouse.yaml "${S3_PATH_BASE}/rotel-lambda-forwarder-clickhouse.yaml" --acl public-read
 
       - name: upload to S3 latest
+        if: github.ref_name == 'main' || github.event_name == "release"
         run: |
-          S3_PATH_BASE="s3://${{ env.S3_BUCKET }}/stacks/latest/${{ matrix.arch }}"
+          S3_PATH_BASE="s3://${{ env.cf_bucket_name }}/stacks/latest/${{ matrix.arch }}"
 
           aws s3 cp ./dist/latest/forwarder-otlp.yaml "${S3_PATH_BASE}/rotel-lambda-forwarder-otlp.yaml" --acl public-read
           aws s3 cp ./dist/latest/forwarder-clickhouse.yaml "${S3_PATH_BASE}/rotel-lambda-forwarder-clickhouse.yaml" --acl public-read

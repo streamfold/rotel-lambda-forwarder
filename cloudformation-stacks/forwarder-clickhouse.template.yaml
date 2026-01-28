@@ -245,7 +245,6 @@ Resources:
                   if request_type in ['Create', 'Update']:
                       # Start the CodeBuild project
                       print(f"Starting CodeBuild project: {project_name}")
-                      response_data['Trigger'] = trigger_value
                       build_response = codebuild.start_build(projectName=project_name)
                       build_id = build_response['build']['id']
                       print(f"Build started with ID: {build_id}")

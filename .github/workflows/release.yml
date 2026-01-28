@@ -241,7 +241,7 @@ jobs:
       - name: set env for release
         if: github.event_name == 'release'
         run: |
-          echo "bucket_name=${{ github.event.release.tag_name }}" >> $GITHUB_ENV
+          echo "ref_name=${{ github.event.release.tag_name }}" >> $GITHUB_ENV
           echo "artifact_bucket_name=${{ env.ARTIFACT_S3_BUCKET }}" >> $GITHUB_ENV
 
       - name: configure AWS credentials (push)
@@ -313,7 +313,7 @@ jobs:
       - name: set env for release
         if: github.event_name == 'release'
         run: |
-          echo "bucket_name=${{ github.event.release.tag_name }}" >> $GITHUB_ENV
+          echo "ref_name=${{ github.event.release.tag_name }}" >> $GITHUB_ENV
           echo "cf_bucket_name=${{ env.CF_S3_BUCKET }}" >> $GITHUB_ENV
           echo "artifact_bucket_name=${{ env.ARTIFACT_S3_BUCKET }}" >> $GITHUB_ENV
 
@@ -351,7 +351,7 @@ jobs:
 
       - name: upload to S3 by version
         run: |
-          S3_PATH_BASE="s3://${{ env.cf_bucket_name }}/stacks/${{ github.ref_name }}/${{ matrix.arch }}"
+          S3_PATH_BASE="s3://${{ env.cf_bucket_name }}/stacks/${{ env.ref_name }}/${{ matrix.arch }}"
 
           aws s3 cp ./dist/versioned/forwarder-otlp.yaml "${S3_PATH_BASE}/rotel-lambda-forwarder-otlp.yaml" --acl public-read
           aws s3 cp ./dist/versioned/forwarder-clickhouse.yaml "${S3_PATH_BASE}/rotel-lambda-forwarder-clickhouse.yaml" --acl public-read

@@ -12,6 +12,7 @@ _Performance of 12 hours of VPC flow log forwarding to ClickHouse Cloud. Average
 
 - **OpenTelemetry Native**: Transforms all logs to OpenTelemetry format
 - **Multiple Export Targets**: Supports OTLP HTTP/gRPC and other exporters via Rotel
+- **Python Log Processors**: Filter, transform, and enrich logs with Python before exporting
 - **Automatic parsing**: Support for JSON and key=value parsing, with automatic detection
 - **Log stream parser mapping**: Pre-built parser rules for known AWS CW log groups/streams
 - **AWS Resource Attributes**: Automatically enriches logs with AWS Lambda and CloudWatch log group tags
@@ -34,32 +35,262 @@ expand as we verify support for additional services.
 
 ## Deploying
 
-### Deploy with Cloudformation
+There are two deployment methods available:
 
-At the moment these only support deploying in the `us-east-1` AWS region. See the section "Manual Deployment" for multi-region
-instructions.
+1. **Docker Container (Recommended)** - Deploy using container images from Amazon ECR Public
+   - Supports all features including Python log processors
+   - Automatic image management via CloudFormation
+   - Available for both x86_64 and arm64 architectures
+
+2. **ZIP File** - Deploy using pre-built Lambda ZIP packages
+   - Simpler deployment for basic use cases
+   - Does not support Python log processors
+   - Available in release downloads
+
+### Deploy with CloudFormation (Docker Container - Recommended)
+
+The CloudFormation templates automatically pull container images from Amazon ECR Public and copy them to your private ECR repository.
+
+**Note:** Python log processors are only supported when using the Docker container deployment method.
 
 #### Export to OTLP endpoint
 
 Launch this stack to export CloudWatch logs to any OTLP compatible endpoint.
 
-| **Region**  | **x86_64**                                                                                                                                                                                                                                                                                                                                    | **arm64**                                                                                                                                                                                                                                                                                                                                    |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `us-east-1` | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?stackName=rotel-lambda-forwarder-otlp&templateURL=https://rotel-cloudformation.s3.us-east-1.amazonaws.com/stacks/latest/x86_64/rotel-lambda-forwarder-otlp.yaml) | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?stackName=rotel-lambda-forwarder-otlp&templateURL=https://rotel-cloudformation.s3.us-east-1.amazonaws.com/stacks/latest/arm64/rotel-lambda-forwarder-otlp.yaml) |
+| **x86_64** | **arm64**|
+|------------|----------|
+| [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)][otlp-stack-x86-84] | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)][otlp-stack-arm64] |
+
+[otlp-stack-x86-84]: https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?stackName=rotel-lambda-forwarder-otlp&templateURL=https://rotel-cloudformation.s3.us-east-1.amazonaws.com/stacks/latest/x86_64/rotel-lambda-forwarder-otlp.yaml
+[otlp-stack-arm64]: https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?stackName=rotel-lambda-forwarder-otlp&templateURL=https://rotel-cloudformation.s3.us-east-1.amazonaws.com/stacks/latest/arm64/rotel-lambda-forwarder-otlp.yaml
 
 #### Export to ClickHouse
 
 Launch this stack to export CloudWatch logs to ClickHouse.
 
-| **Region**  | **x86_64**                                                                                                                                                                                                                                                                                                                                                | **arm64**                                                                                                                                                                                                                                                                                                                                                |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `us-east-1` | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?stackName=rotel-lambda-forwarder-clickhouse&templateURL=https://rotel-cloudformation.s3.us-east-1.amazonaws.com/stacks/latest/x86_64/rotel-lambda-forwarder-clickhouse.yaml) | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?stackName=rotel-lambda-forwarder-clickhouse&templateURL=https://rotel-cloudformation.s3.us-east-1.amazonaws.com/stacks/latest/arm64/rotel-lambda-forwarder-clickhouse.yaml) |
+| **x86_64** | **arm64**|
+|------------|----------|
+| [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)][ch-stack-x86-84] | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)][ch-stack-arm64] |
+
+[ch-stack-x86-84]: https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?stackName=rotel-lambda-forwarder-clickhouse&templateURL=https://rotel-cloudformation.s3.us-east-1.amazonaws.com/stacks/latest/x86_64/rotel-lambda-forwarder-clickhouse.yaml
+[ch-stack-arm64]: https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?stackName=rotel-lambda-forwarder-clickhouse&templateURL=https://rotel-cloudformation.s3.us-east-1.amazonaws.com/stacks/latest/arm64/rotel-lambda-forwarder-clickhouse.yaml
+
+### Upgrading with CloudFormation
+
+To upgrade the Lambda function to use the latest upstream image, you can update the CloudFormation stack using the **ForceRedeploy** parameter:
+
+#### Method 1: Force Redeploy with Same Tag
+
+If you're using a tag like `latest` and want to pull the newest version:
+
+1. Navigate to your CloudFormation stack in the AWS Console
+2. Click **Update** on the stack
+3. Select **Use current template**
+4. Find the **ForceRedeploy** parameter
+5. Increment the value (e.g., change from `1` to `2`, or use a timestamp like `2024-01-15`)
+6. Complete the stack update
+
+The CloudFormation stack will automatically:
+- Pull the latest image from Amazon ECR Public (`public.ecr.aws/streamfold/rotel-lambda-forwarder`)
+- Copy it to your private ECR repository
+- Redeploy the Lambda function with the updated image
+
+#### Method 2: Upgrade to Specific Version
+
+To upgrade to a specific version tag (e.g., `v1.2.3`):
+
+1. Navigate to your CloudFormation stack in the AWS Console
+2. Click **Update** on the stack
+3. Select **Use current template**
+4. Find the **ForwarderImageTag** parameter
+5. Change the value to the desired version (e.g., from `latest` to `v1.2.3`)
+6. Complete the stack update
+
+**Note:** When using CloudFormation deployment, you don't need to manually pull and push images - the stack handles this automatically through a CodeBuild project.
 
 ### Manual Deployment to AWS
 
-For production deployments, follow these steps to manually deploy the Lambda function using pre-built artifacts.
+You can deploy the forwarder manually using either the Docker container (recommended) or ZIP file method.
 
-You can download pre-built deployment Lambda .zip files for x86_64 and arm64 architectures from the [Releases](https://github.com/streamfold/rotel-lambda-forwarder/releases) page, or from the following links:
+#### Option 1: Docker Container Deployment (Recommended)
+
+**Supports:** All features including Python log processors
+
+The forwarder is available as a container image in [Amazon ECR Public](https://gallery.ecr.aws/streamfold/rotel-lambda-forwarder):
+
+```
+public.ecr.aws/streamfold/rotel-lambda-forwarder:latest
+```
+
+##### Step 1: Copy Image to Your Private ECR
+
+First, create a private ECR repository:
+
+```bash
+aws ecr create-repository \
+  --repository-name rotel-lambda-forwarder \
+  --region YOUR_REGION
+```
+
+Pull the image from ECR Public and push to your private repository:
+
+```bash
+# Login to ECR Public (us-east-1 only)
+aws ecr-public get-login-password --region us-east-1 | \
+  docker login --username AWS --password-stdin public.ecr.aws
+
+# Pull the image
+docker pull public.ecr.aws/streamfold/rotel-lambda-forwarder:latest
+
+# Login to your private ECR
+aws ecr get-login-password --region YOUR_REGION | \
+  docker login --username AWS --password-stdin YOUR_ACCOUNT_ID.dkr.ecr.YOUR_REGION.amazonaws.com
+
+# Tag the image for your private registry
+docker tag public.ecr.aws/streamfold/rotel-lambda-forwarder:latest \
+  YOUR_ACCOUNT_ID.dkr.ecr.YOUR_REGION.amazonaws.com/rotel-lambda-forwarder:latest
+
+# Push to your private ECR
+docker push YOUR_ACCOUNT_ID.dkr.ecr.YOUR_REGION.amazonaws.com/rotel-lambda-forwarder:latest
+```
+
+Replace:
+- `YOUR_REGION` with your AWS region (e.g., `us-west-2`)
+- `YOUR_ACCOUNT_ID` with your AWS account ID
+
+##### Step 2: Create IAM Execution Role
+
+Create an IAM role with the necessary permissions for the Lambda function:
+
+```bash
+aws iam create-role \
+  --role-name rotel-lambda-forwarder-role \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {"Service": "lambda.amazonaws.com"},
+      "Action": "sts:AssumeRole"
+    }]
+  }'
+```
+
+Attach the basic Lambda execution policy:
+
+```bash
+aws iam attach-role-policy \
+  --role-name rotel-lambda-forwarder-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+```
+
+Create and attach a custom policy with required permissions:
+
+```bash
+aws iam create-policy \
+  --policy-name rotel-lambda-forwarder-policy \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Action": [
+          "logs:ListTagsForResource"
+        ],
+        "Resource": "arn:aws:logs:*:*:log-group:*"
+      },
+      {
+        "Effect": "Allow",
+        "Action": [
+          "ec2:DescribeFlowLogs"
+        ],
+        "Resource": "*"
+      },
+      {
+        "Effect": "Allow",
+        "Action": [
+          "s3:GetObject",
+          "s3:PutObject"
+        ],
+        "Resource": "arn:aws:s3:::YOUR_BUCKET_NAME/rotel-lambda-forwarder/*"
+      },
+      {
+        "Effect": "Allow",
+        "Action": [
+          "s3:ListBucket"
+        ],
+        "Resource": "arn:aws:s3:::YOUR_BUCKET_NAME"
+      },
+      {
+        "Effect": "Allow",
+        "Action": [
+          "ecr:GetAuthorizationToken",
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchGetImage"
+        ],
+        "Resource": "*"
+      }
+    ]
+  }'
+
+aws iam attach-role-policy \
+  --role-name rotel-lambda-forwarder-role \
+  --policy-arn arn:aws:iam::YOUR_ACCOUNT_ID:policy/rotel-lambda-forwarder-policy
+```
+
+##### Step 3: Create Lambda Function from Container Image
+
+```bash
+aws lambda create-function \
+  --function-name rotel-lambda-forwarder \
+  --package-type Image \
+  --code ImageUri=YOUR_ACCOUNT_ID.dkr.ecr.YOUR_REGION.amazonaws.com/rotel-lambda-forwarder:latest \
+  --role arn:aws:iam::YOUR_ACCOUNT_ID:role/rotel-lambda-forwarder-role \
+  --timeout 30 \
+  --memory-size 256 \
+  --architectures x86_64 \
+  --region YOUR_REGION \
+  --environment Variables="{
+    ROTEL_EXPORTER=otlp,
+    ROTEL_OTLP_EXPORTER_ENDPOINT=https://your-otlp-endpoint.com,
+    FORWARDER_S3_BUCKET=your-cache-bucket-name
+  }"
+```
+
+**Important parameters:**
+- `--package-type Image`: Indicates this is a container-based Lambda
+- `--code ImageUri`: The full URI of your container image in ECR
+- `--architectures`: Must match the image architecture (`x86_64` or `arm64`)
+- `--timeout`: Adjust based on your log volume (recommended: 30 seconds)
+- `--memory-size`: Adjust based on log volume (recommended: 256-512 MB)
+
+##### Step 4: Update Function with New Image (for updates)
+
+To update the function with a new image version:
+
+```bash
+# Pull new image from ECR Public
+docker pull public.ecr.aws/streamfold/rotel-lambda-forwarder:v1.2.3
+
+# Tag and push to your private ECR
+docker tag public.ecr.aws/streamfold/rotel-lambda-forwarder:v1.2.3 \
+  YOUR_ACCOUNT_ID.dkr.ecr.YOUR_REGION.amazonaws.com/rotel-lambda-forwarder:v1.2.3
+
+docker push YOUR_ACCOUNT_ID.dkr.ecr.YOUR_REGION.amazonaws.com/rotel-lambda-forwarder:v1.2.3
+
+# Update Lambda function
+aws lambda update-function-code \
+  --function-name rotel-lambda-forwarder \
+  --image-uri YOUR_ACCOUNT_ID.dkr.ecr.YOUR_REGION.amazonaws.com/rotel-lambda-forwarder:v1.2.3
+```
+
+---
+
+#### Option 2: ZIP File Deployment
+
+**Note:** Python log processors are **not supported** with ZIP file deployment. Use Docker container deployment if you need Python processor support.
+
+You can download pre-built Lambda ZIP files for x86_64 and arm64 architectures from the [Releases](https://github.com/streamfold/rotel-lambda-forwarder/releases) page, or from the following links:
 
 | **Region** | **x86_64**                                                                                                                            | **arm64**                                                                                                                            |
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -83,7 +314,7 @@ _NOTE_: These are located in the AWS us-east-1 region, so you can only create La
 you need to create the function in a different region, you'll need to copy the `rotel-lambda-forwarder.zip` to a different
 bucket in the same region as the function.
 
-#### 1. Create IAM Execution Role
+##### Step 1: Create IAM Execution Role (ZIP Deployment)
 
 Create an IAM role with the necessary permissions for the Lambda function:
 
@@ -164,7 +395,7 @@ Replace `YOUR_BUCKET_NAME` with your S3 bucket name and `YOUR_ACCOUNT_ID` with y
 
 Note the role ARN from the output for the next step.
 
-#### 2. Create the Lambda Function
+##### Step 2: Create the Lambda Function (ZIP Deployment)
 
 Create the Lambda function using the AWS CLI:
 
@@ -186,13 +417,12 @@ aws lambda create-function \
 ```
 
 **Important parameters:**
-
 - `--runtime`: Use `provided.al2023` for Amazon Linux 2023 custom runtime
-- `--architectures`: Must match your build target (`x86_64`\_
+- `--architectures`: Must match your build target (`x86_64` or `arm64`)
 - `--timeout`: Adjust based on your log volume (recommended: 30 seconds)
 - `--memory-size`: Adjust based on log volume (recommended: 256-512 MB)
 
-#### 3. Update Function Code (for updates)
+##### Step 3: Update Function Code (for updates)
 
 To update an existing function with the latest version:
 
@@ -204,7 +434,7 @@ aws lambda update-function-code \
   --s3-key rotel-lambda-forwarder/latest/x86_64/rotel-lambda-forwarder.zip
 ```
 
-#### 4. Configure Function Settings (optional)
+##### Step 4: Configure Function Settings (optional)
 
 Update environment variables:
 
@@ -347,6 +577,29 @@ be set to the function's maximum timeout.
 ```bash
 ROTEL_EXPORTER_RETRY_MAX_ELAPSED_TIME=30s
 ```
+
+### OTLP Log Processors from S3
+
+You can configure OTLP log processors to transform or filter logs before they are exported. The Lambda Forwarder supports loading processor configurations from any HTTP endpoint or S3 bucket.
+
+See the Python [Processor SDK](https://rotel.dev/docs/category/processor-sdk) for how to construct these processors.
+
+Set the `FORWARDER_OTLP_LOG_PROCESSORS` environment variable of the Lambda Forwarder function, or through
+the `LogProcessors` CloudFormation parameter.
+
+```bash
+FORWARDER_OTLP_LOG_PROCESSORS="https://gist.githubusercontent.com/mheffner/4d4aaa0f3f7ffc620fb740763f4e0098/raw/parse_vpc_logs.py,s3://my-bucket-name/processors/filter-ecs-logs.py"
+```
+
+**Important**: If you load processors from an S3 bucket, make sure the Lambda environment has IAM permissions
+to read from the bucket.
+
+**Features**:
+- Multiple URIs can be specified as a comma-separated list (supports: http, https, or s3)
+- Processors are downloaded to `/tmp/log_processors/`
+- Processors are executed in the order specified in `FORWARDER_OTLP_LOG_PROCESSORS`
+
+**Example**: See [examples/processors/parse_vpc_logs.py](examples/processors/parse_vpc_logs.py) for an example of filtering VPC logs that indicate a REJECTED flow.
 
 ## Setting Up CloudWatch Logs Subscription
 

@@ -1,6 +1,6 @@
 # Rotel Lambda Forwarder
 
-An AWS Lambda function written in Rust that forwards CloudWatch Logs to OpenTelemetry-compatible backends. This function receives CloudWatch Logs events via subscription filters, transforms them into OpenTelemetry log format, and exports them using the [Rotel](https://github.com/streamfold/rotel) agent. This is built on the existing Rotel OpenTelemetry data plane, so logs can be exported to any [supported exporter](https://rotel.dev/docs/category/exporters).
+An AWS Lambda function written in Rust that forwards CloudWatch Logs and S3-stored logs to OpenTelemetry-compatible backends. This function receives CloudWatch Logs events via subscription filters or S3 event notifications, transforms them into OpenTelemetry log format, and exports them using the [Rotel](https://github.com/streamfold/rotel) agent. This is built on the existing Rotel OpenTelemetry data plane, so logs can be exported to any [supported exporter](https://rotel.dev/docs/category/exporters).
 
 ---
 
@@ -11,6 +11,8 @@ _Performance of 12 hours of VPC flow log forwarding to ClickHouse Cloud. Average
 ## Features
 
 - **OpenTelemetry Native**: Transforms all logs to OpenTelemetry format
+- **Multiple Log Sources**: Supports both CloudWatch Logs subscriptions and S3 event notifications
+- **S3 Log Processing**: Automatically processes log files stored in S3 with compression support
 - **Multiple Export Targets**: Supports OTLP HTTP/gRPC and other exporters via Rotel
 - **Python Log Processors**: Filter, transform, and enrich logs with Python before exporting
 - **Automatic parsing**: Support for JSON and key=value parsing, with automatic detection
@@ -24,14 +26,17 @@ The following services have been tested to work via CloudWatch Logs and include 
 Unlisted services that log via CloudWatch will likely work, but may be missing custom processing. This list will
 expand as we verify support for additional services.
 
-| **Source**             | **Location** |
-| ---------------------- | ------------ |
-| CodeBuild Logs         | CloudWatch   |
-| CloudWatch Logs        | CloudWatch   |
-| CloudTrail Logs        | CloudWatch   |
-| EKS Control Plane Logs | CloudWatch   |
-| Lambda Logs            | CloudWatch   |
-| VPC Flow Logs          | CloudWatch   |
+| **Source**             | **Location**        |
+| ---------------------- | ------------------- |
+| CodeBuild Logs         | CloudWatch          |
+| CloudWatch Logs        | CloudWatch          |
+| CloudTrail Logs        | CloudWatch / S3     |
+| EKS Control Plane Logs | CloudWatch          |
+| Lambda Logs            | CloudWatch          |
+| VPC Flow Logs          | CloudWatch          |
+| Application Logs       | S3                  |
+| ELB Access Logs        | S3                  |
+| Any Log Files          | S3 (JSON, key-value)|
 
 ## Deploying
 

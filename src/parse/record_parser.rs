@@ -1,6 +1,5 @@
 use std::sync::{Arc, OnceLock};
 
-use aws_lambda_events::cloudwatch_logs::LogEntry;
 use opentelemetry_proto::tonic::{
     common::v1::{AnyValue, KeyValue, any_value::Value},
     logs::v1::{LogRecord, SeverityNumber},
@@ -29,6 +28,22 @@ pub(crate) struct RecordParser {
     flow_log_parsed_fields: Option<Arc<ParsedFields>>,
 }
 
+pub(crate) struct RecordLogEntry {
+    cloudwatch_id: Option<String>,
+    timestamp: i64,
+    message: String,
+}
+
+impl RecordLogEntry {
+    pub(crate) fn new(cloudwatch_id: Option<String>, timestamp: i64, message: String) -> Self {
+        Self {
+            cloudwatch_id,
+            timestamp,
+            message,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct RecordParserError(pub(crate) ParserError, pub(crate) String);
 
@@ -49,24 +64,78 @@ impl RecordParser {
 
     /// Parse a CloudWatch LogEntry into an OpenTelemetry LogRecord.
     /// If parsing fails, the message is treated as plain text.
-    pub(crate) fn parse(&self, now_nanos: u64, log_entry: LogEntry) -> LogRecord {
+    pub(crate) fn parse(&self, now_nanos: u64, log_entry: RecordLogEntry) -> LogRecord {
         let mut lr = LogRecord {
             time_unix_nano: (log_entry.timestamp * 1_000_000) as u64,
             observed_time_unix_nano: now_nanos,
-            attributes: vec![KeyValue {
-                key: "cloudwatch.id".to_string(),
-                value: Some(AnyValue {
-                    value: Some(Value::StringValue(log_entry.id)),
-                }),
-            }],
-            dropped_attributes_count: 0,
             ..Default::default()
         };
+
+        if let Some(cloudwatch_id) = log_entry.cloudwatch_id {
+            lr.attributes.push(KeyValue {
+                key: "cloudwatch.id".to_string(),
+                value: Some(AnyValue {
+                    value: Some(Value::StringValue(cloudwatch_id)),
+                }),
+            })
+        }
 
         let message = log_entry.message;
 
         // Try to parse the message into a map
-        let json_map = match self.parser_type {
+        let json_map = self.parse_message_to_map(message, &mut lr);
+
+        match json_map {
+            Ok(None) => {}
+            Ok(Some(mut map)) => {
+                self.field_stripper.strip_fields(&mut map);
+
+                self.populate_log_record_from_map(map, &mut lr);
+            }
+            Err(RecordParserError(err, msg)) => {
+                warn!(error = ?err, "Failed to parse log entry, using raw text as body");
+
+                // If parsing failed, treat as plain text
+                lr.body = Some(AnyValue {
+                    value: Some(Value::StringValue(msg)),
+                });
+            }
+        }
+
+        lr
+    }
+
+    /// Parse a pre-parsed JSON map into an OpenTelemetry LogRecord.
+    /// This is used for S3 logs where the entire file is a JSON blob with a Records array.
+    pub(crate) fn parse_from_map(
+        &self,
+        now_nanos: u64,
+        timestamp: i64,
+        mut json_map: serde_json::Map<String, JsonValue>,
+    ) -> LogRecord {
+        let mut lr = LogRecord {
+            time_unix_nano: (timestamp * 1_000_000) as u64,
+            observed_time_unix_nano: now_nanos,
+            ..Default::default()
+        };
+
+        // Strip sensitive fields
+        self.field_stripper.strip_fields(&mut json_map);
+
+        // Populate the log record from the map
+        self.populate_log_record_from_map(json_map, &mut lr);
+
+        lr
+    }
+
+    /// Parse a message string into a JSON map based on the parser type.
+    /// This is the first phase of parsing that converts a string message into a structured map.
+    fn parse_message_to_map(
+        &self,
+        message: String,
+        lr: &mut LogRecord,
+    ) -> Result<Option<serde_json::Map<String, JsonValue>>, RecordParserError> {
+        match self.parser_type {
             ParserType::Json => parse_json_to_map(message).map(|r| Some(r)),
             ParserType::KeyValue => parse_keyvalue_to_map(message).map(|r| Some(r)),
             ParserType::VpcLog => {
@@ -94,26 +163,7 @@ impl RecordParser {
                     Ok(None)
                 }
             }
-        };
-
-        match json_map {
-            Ok(None) => {}
-            Ok(Some(mut map)) => {
-                self.field_stripper.strip_fields(&mut map);
-
-                self.populate_log_record_from_map(map, &mut lr);
-            }
-            Err(RecordParserError(err, msg)) => {
-                warn!(error = ?err, "Failed to parse log entry, using raw text as body");
-
-                // If parsing failed, treat as plain text
-                lr.body = Some(AnyValue {
-                    value: Some(Value::StringValue(msg)),
-                });
-            }
         }
-
-        lr
     }
 
     /// Populate a LogRecord from a parsed map (applies to both JSON and keyvalue formats)
@@ -327,7 +377,7 @@ mod tests {
     fn parse_log_msg(message: &str, platform: LogPlatform, parser_type: ParserType) -> LogRecord {
         let log_entry = create_log_entry(message);
         let parser = RecordParser::new(platform, parser_type, None);
-        parser.parse(123456789, log_entry)
+        parser.parse(123456789, log_entry.into())
     }
 
     #[test]

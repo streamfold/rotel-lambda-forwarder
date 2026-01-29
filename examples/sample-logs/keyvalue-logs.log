@@ -1,0 +1,10 @@
+time="2025-01-15T10:30:00Z" level=info msg="Application started successfully" service=web-api version=1.2.3 request_id=abc123
+time="2025-01-15T10:30:01Z" level=debug msg="Processing incoming request" service=web-api method=GET path=/api/users client_ip=192.168.1.100
+time="2025-01-15T10:30:02Z" level=info msg="Database query executed" service=web-api query_time_ms=45 rows_affected=10
+time="2025-01-15T10:30:03Z" level=warn msg="Rate limit approaching threshold" service=web-api current_rate=850 threshold=1000 user_id=user-456
+time="2025-01-15T10:30:04Z" level=error msg="Failed to connect to external API" service=web-api error="connection timeout" retry_count=3 endpoint=https://api.example.com/data
+time="2025-01-15T10:30:05Z" level=info msg="Request completed successfully" service=web-api status_code=200 duration_ms=125 request_id=abc123
+time="2025-01-15T10:30:06Z" level=info msg="Cache hit for user profile" service=web-api cache_key=user:789 ttl_seconds=3600
+time="2025-01-15T10:30:07Z" level=debug msg="Validating input parameters" service=web-api field=email
+time="2025-01-15T10:30:08Z" level=error msg="Authentication failed" service=web-api reason=invalid_token user_agent="Mozilla/5.0" client_ip=192.168.1.101
+time="2025-01-15T10:30:09Z" level=info msg="Metrics published successfully" service=web-api metric_count=25 destination=cloudwatch

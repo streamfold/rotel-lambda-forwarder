@@ -107,6 +107,21 @@ async fn run_forwarder(
     env: &str,
     s3_bucket: Option<String>,
 ) -> Result<(), BoxError> {
+    // Setup log processors from environment variable
+    match rotel_lambda_forwarder::log_processors::setup_log_processors().await {
+        Ok(Some(processor_paths)) => {
+            info!(paths = ?processor_paths, "Configuring agent with log processors");
+            agent_args.otlp_with_logs_processor = processor_paths;
+        }
+        Ok(None) => {
+            debug!("No log processors configured");
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed to setup log processors, continuing without them");
+            // Don't fail startup, just log the warning
+        }
+    }
+
     let (logs_tx, logs_rx) = rotel::bounded_channel::bounded(LOGS_QUEUE_SIZE);
 
     let (flush_logs_tx, flush_logs_sub) = FlushBroadcast::new().into_parts();

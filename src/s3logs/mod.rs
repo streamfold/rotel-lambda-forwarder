@@ -5,10 +5,8 @@ use tracing::{error, info};
 
 use crate::aws_attributes::AwsAttributes;
 
-mod memory_semaphore;
 mod s3record;
 
-use memory_semaphore::MemorySemaphore;
 use s3record::S3Record;
 
 /// Configuration for S3 log processing
@@ -16,8 +14,6 @@ use s3record::S3Record;
 pub struct S3LogsConfig {
     /// Maximum number of S3 objects to process in parallel
     pub max_parallel_objects: usize,
-    /// Maximum total size of objects to load in memory at once (in bytes)
-    pub max_memory_bytes: usize,
     /// Maximum number of log records to batch before sending
     pub batch_size: usize,
 }
@@ -26,7 +22,6 @@ impl Default for S3LogsConfig {
     fn default() -> Self {
         Self {
             max_parallel_objects: 5,
-            max_memory_bytes: 100 * 1024 * 1024, // 100 MB
             batch_size: 1000,
         }
     }
@@ -58,12 +53,6 @@ impl Parser {
             .and_then(|v| v.parse().ok())
             .unwrap_or(5);
 
-        let max_memory_bytes = std::env::var("FORWARDER_S3_MAX_MEMORY_MB")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .map(|mb| mb * 1024 * 1024)
-            .unwrap_or(100 * 1024 * 1024);
-
         let batch_size = std::env::var("FORWARDER_S3_BATCH_SIZE")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -71,7 +60,6 @@ impl Parser {
 
         S3LogsConfig {
             max_parallel_objects,
-            max_memory_bytes,
             batch_size,
         }
     }
@@ -86,9 +74,6 @@ impl Parser {
 
         let mut all_resource_logs = Vec::new();
 
-        // Create semaphore for controlling parallel access
-        let memory_semaphore = MemorySemaphore::new(self.config.max_memory_bytes);
-
         // Process records in parallel with controlled concurrency
         let mut tasks = Vec::new();
         let max_concurrent = self.config.max_parallel_objects;
@@ -97,7 +82,6 @@ impl Parser {
             let s3_client = self.s3_client.clone();
             let aws_attributes = self.aws_attributes.clone();
             let request_id = self.request_id.clone();
-            let memory_sem = memory_semaphore.clone();
             let batch_size = self.config.batch_size;
 
             // Wait if we've hit the concurrency limit
@@ -121,7 +105,6 @@ impl Parser {
                 s3_client,
                 aws_attributes,
                 request_id,
-                memory_sem,
                 batch_size,
             );
 

@@ -16,7 +16,6 @@ use crate::parse::cwlogs::{LogPlatform, ParserType};
 use crate::parse::record_parser::{RecordLogEntry, RecordParser};
 
 use super::ParserError;
-use super::memory_semaphore::MemorySemaphore;
 
 /// Represents an S3 record to be processed
 pub struct S3Record {
@@ -25,7 +24,6 @@ pub struct S3Record {
     s3_client: S3Client,
     aws_attributes: AwsAttributes,
     request_id: String,
-    memory_semaphore: MemorySemaphore,
     batch_size: usize,
 }
 
@@ -37,7 +35,6 @@ impl S3Record {
         s3_client: S3Client,
         aws_attributes: AwsAttributes,
         request_id: String,
-        memory_semaphore: MemorySemaphore,
         batch_size: usize,
     ) -> Self {
         Self {
@@ -46,7 +43,6 @@ impl S3Record {
             s3_client,
             aws_attributes,
             request_id,
-            memory_semaphore,
             batch_size,
         }
     }
@@ -89,12 +85,6 @@ impl S3Record {
             "S3 object details"
         );
 
-        // Acquire memory permit based on object size
-        let permit = self
-            .memory_semaphore
-            .acquire(object_size as usize, &self.request_id)
-            .await;
-
         // Load object from S3
         let object_data =
             load_s3_object(&self.s3_client, bucket_name, object_key, &self.request_id).await?;
@@ -119,9 +109,6 @@ impl S3Record {
             &self.request_id,
             self.batch_size,
         )?;
-
-        // Release memory permit
-        drop(permit);
 
         Ok(resource_logs)
     }

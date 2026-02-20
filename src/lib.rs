@@ -6,6 +6,7 @@ pub mod init;
 pub mod log_processors;
 pub mod parse;
 pub mod s3_cache;
+pub mod s3logs;
 pub mod tags;
 
 static INIT_CRYPTO: std::sync::Once = std::sync::Once::new();

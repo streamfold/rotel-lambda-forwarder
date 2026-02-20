@@ -11,9 +11,9 @@ use opentelemetry_proto::tonic::{
 };
 use tracing::{debug, info};
 
+use crate::aws_attributes::AwsAttributes;
 use crate::parse::cwlogs::{LogPlatform, ParserType};
-use crate::parse::record_parser::RecordParser;
-use crate::{aws_attributes::AwsAttributes, parse::record_parser::RecordLogEntry};
+use crate::parse::record_parser::{RecordLogEntry, RecordParser};
 
 use super::ParserError;
 use super::memory_semaphore::MemorySemaphore;

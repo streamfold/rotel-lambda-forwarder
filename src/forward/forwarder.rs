@@ -13,7 +13,7 @@ use crate::events::{LambdaEvent, LambdaPayload};
 use crate::flowlogs::FlowLogManager;
 use crate::forward::{AckerBuilder, AckerWaiter};
 use crate::parse::cwlogs;
-use crate::parse::s3logs;
+use crate::s3logs;
 use crate::tags::TagManager;
 
 pub struct Forwarder {

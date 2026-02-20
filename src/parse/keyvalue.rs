@@ -167,7 +167,7 @@ mod tests {
     fn parse_log_msg(message: &str, platform: LogPlatform) -> LogRecord {
         let log_entry = create_log_entry(message);
         let parser = RecordParser::new(platform, ParserType::KeyValue, None);
-        parser.parse(123456789, log_entry)
+        parser.parse(123456789, log_entry.into())
     }
 
     #[test]

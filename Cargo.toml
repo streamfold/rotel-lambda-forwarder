@@ -6,7 +6,7 @@ homepage = "https://github.com/streamfold/rotel-lambda-forwarder"
 readme = "README.md"
 
 [dependencies]
-aws_lambda_events = { version = "1.0.0", default-features = false, features = ["cloudwatch_logs"] }
+aws_lambda_events = { version = "1.0.0", default-features = false, features = ["cloudwatch_logs", "s3"] }
 aws-config = { version = "1.8", features = ["behavior-version-latest"] }
 aws-sdk-cloudwatchlogs = "1.115"
 aws-sdk-ec2 = "1.200"

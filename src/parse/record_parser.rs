@@ -1,6 +1,5 @@
 use std::sync::{Arc, OnceLock};
 
-use aws_lambda_events::cloudwatch_logs::LogEntry;
 use opentelemetry_proto::tonic::{
     common::v1::{AnyValue, KeyValue, any_value::Value},
     logs::v1::{LogRecord, SeverityNumber},
@@ -29,6 +28,22 @@ pub(crate) struct RecordParser {
     flow_log_parsed_fields: Option<Arc<ParsedFields>>,
 }
 
+pub(crate) struct RecordLogEntry {
+    cloudwatch_id: Option<String>,
+    timestamp: i64,
+    message: String,
+}
+
+impl RecordLogEntry {
+    pub(crate) fn new(cloudwatch_id: Option<String>, timestamp: i64, message: String) -> Self {
+        Self {
+            cloudwatch_id,
+            timestamp,
+            message,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct RecordParserError(pub(crate) ParserError, pub(crate) String);
 
@@ -49,19 +64,23 @@ impl RecordParser {
 
     /// Parse a CloudWatch LogEntry into an OpenTelemetry LogRecord.
     /// If parsing fails, the message is treated as plain text.
-    pub(crate) fn parse(&self, now_nanos: u64, log_entry: LogEntry) -> LogRecord {
+    pub(crate) fn parse(&self, now_nanos: u64, log_entry: RecordLogEntry) -> LogRecord {
         let mut lr = LogRecord {
             time_unix_nano: (log_entry.timestamp * 1_000_000) as u64,
             observed_time_unix_nano: now_nanos,
-            attributes: vec![KeyValue {
-                key: "cloudwatch.id".to_string(),
-                value: Some(AnyValue {
-                    value: Some(Value::StringValue(log_entry.id)),
-                }),
-            }],
+            attributes: vec![],
             dropped_attributes_count: 0,
             ..Default::default()
         };
+        
+        if let Some(cloudwatch_id) = log_entry.cloudwatch_id {
+            lr.attributes.push(KeyValue {
+                key: "cloudwatch.id".to_string(),
+                value: Some(AnyValue {
+                    value: Some(Value::StringValue(cloudwatch_id)),
+                }),
+            })
+        }
 
         let message = log_entry.message;
 
@@ -327,7 +346,7 @@ mod tests {
     fn parse_log_msg(message: &str, platform: LogPlatform, parser_type: ParserType) -> LogRecord {
         let log_entry = create_log_entry(message);
         let parser = RecordParser::new(platform, parser_type, None);
-        parser.parse(123456789, log_entry)
+        parser.parse(123456789, log_entry.into())
     }
 
     #[test]

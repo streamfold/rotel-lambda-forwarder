@@ -334,7 +334,6 @@ fn detect_log_format(lines: &[&str]) -> (LogPlatform, ParserType) {
     // Sample first few lines
     let sample_size = lines.len().min(5);
     let mut json_count = 0;
-    let mut keyvalue_count = 0;
 
     for line in &lines[..sample_size] {
         let trimmed = line.trim();
@@ -343,18 +342,11 @@ fn detect_log_format(lines: &[&str]) -> (LogPlatform, ParserType) {
         if trimmed.starts_with('{') && trimmed.ends_with('}') {
             json_count += 1;
         }
-
-        // Check for key-value patterns (contains = signs)
-        if trimmed.contains('=') && !trimmed.starts_with('{') {
-            keyvalue_count += 1;
-        }
     }
 
     // Decide based on majority
     let parser_type = if json_count > sample_size / 2 {
         ParserType::Json
-    } else if keyvalue_count > sample_size / 2 {
-        ParserType::KeyValue
     } else {
         ParserType::Unknown
     };
@@ -377,18 +369,6 @@ mod tests {
 
         let (_platform, parser_type) = detect_log_format(&lines);
         assert_eq!(parser_type, ParserType::Json);
-    }
-
-    #[test]
-    fn test_detect_log_format_keyvalue() {
-        let lines = vec![
-            r#"time="2025-01-01T00:00:00Z" level=info msg="test message 1""#,
-            r#"time="2025-01-01T00:00:01Z" level=debug msg="test message 2""#,
-            r#"time="2025-01-01T00:00:02Z" level=error msg="test message 3""#,
-        ];
-
-        let (_platform, parser_type) = detect_log_format(&lines);
-        assert_eq!(parser_type, ParserType::KeyValue);
     }
 
     #[test]
@@ -431,38 +411,6 @@ mod tests {
         let log_data = r#"{"level":"info","msg":"test message 1","service":"test"}
 {"level":"error","msg":"test message 2","service":"test"}
 {"level":"debug","msg":"test message 3","service":"test"}"#;
-
-        let aws_attributes = AwsAttributes {
-            region: "us-east-1".to_string(),
-            account_id: "123456789012".to_string(),
-            invoked_function_arn: "arn:aws:lambda:us-east-1:123456789012:function:test".to_string(),
-        };
-
-        let event_time = Utc::now();
-        let result = parse_log_lines(
-            log_data.as_bytes(),
-            event_time,
-            "test-bucket",
-            "test-key.log",
-            &aws_attributes,
-            "test-request-id",
-            1000,
-        );
-
-        assert!(result.is_ok());
-        let resource_logs = result.unwrap();
-        assert_eq!(resource_logs.len(), 1);
-
-        let logs = &resource_logs[0];
-        assert_eq!(logs.scope_logs.len(), 1);
-        assert_eq!(logs.scope_logs[0].log_records.len(), 3);
-    }
-
-    #[tokio::test]
-    async fn test_parse_log_lines_keyvalue() {
-        let log_data = r#"time="2025-01-01T00:00:00Z" level=info msg="test message 1"
-time="2025-01-01T00:00:01Z" level=error msg="test message 2"
-time="2025-01-01T00:00:02Z" level=debug msg="test message 3""#;
 
         let aws_attributes = AwsAttributes {
             region: "us-east-1".to_string(),

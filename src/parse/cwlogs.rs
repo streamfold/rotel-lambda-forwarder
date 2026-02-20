@@ -2,7 +2,7 @@ use regex::Regex;
 use std::sync::LazyLock;
 use std::{collections::HashMap, sync::Arc};
 
-use aws_lambda_events::cloudwatch_logs::LogsEvent;
+use aws_lambda_events::cloudwatch_logs::{LogEntry, LogsEvent};
 use opentelemetry_proto::tonic::{
     common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value::Value},
     logs::v1::{ResourceLogs, ScopeLogs},
@@ -10,6 +10,7 @@ use opentelemetry_proto::tonic::{
 };
 use tracing::debug;
 
+use crate::parse::record_parser::RecordLogEntry;
 use crate::{
     aws_attributes::AwsAttributes,
     flowlogs::{FlowLogManager, ParsedFields},
@@ -171,7 +172,7 @@ impl<'a> Parser<'a> {
         let log_records = log_data
             .log_events
             .into_iter()
-            .map(|log| rec_parser.parse(now_nanos, log))
+            .map(|log| rec_parser.parse(now_nanos, log.into()))
             .collect();
 
         let resource_logs = ResourceLogs {
@@ -203,6 +204,12 @@ impl<'a> Parser<'a> {
         resource_logs_list.push(resource_logs);
 
         Ok(resource_logs_list)
+    }
+}
+
+impl From<LogEntry> for RecordLogEntry {
+    fn from(value: LogEntry) -> Self {
+        RecordLogEntry::new(Some(value.id), value.timestamp, value.message)
     }
 }
 
@@ -389,7 +396,7 @@ mod tests {
         log_entry.message = log_msg.to_string();
 
         let rec_parser = RecordParser::new(LogPlatform::Eks, ParserType::KeyValue, None);
-        let log_record = rec_parser.parse(123456789, log_entry);
+        let log_record = rec_parser.parse(123456789, log_entry.into());
 
         // Verify the log was parsed correctly
         assert_eq!(log_record.severity_number, 9); // Info

@@ -393,8 +393,7 @@ fn create_base_attributes(
             }),
         },
     ];
-    
-    
+
     // Add cloud.platform attribute based on detected platform
     if log_platform != LogPlatform::Unknown {
         attributes.push(KeyValue {
@@ -404,9 +403,8 @@ fn create_base_attributes(
             }),
         });
     }
-    
-    attributes
 
+    attributes
 }
 
 /// Create a ResourceLogs structure from attributes and log records
@@ -679,7 +677,7 @@ mod tests {
         );
 
         assert_eq!(
-            detect_log_platform_from_key("cloudtrail/logs/test.json"),
+            detect_log_platform_from_key("CloudTrail/logs/test.json"),
             LogPlatform::Cloudtrail
         );
 

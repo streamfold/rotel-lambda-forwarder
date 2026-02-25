@@ -601,7 +601,7 @@ The forwarder supports processing log files stored in S3 via S3 event notificati
 
 - **Automatic Format Detection**: Intelligently detects JSON, key-value, and plain text log formats
 - **Parallel Processing**: Processes multiple S3 objects concurrently with configurable limits
-- **Efficient Batching**: Batches log records to optimize network usage and reduce costs
+- **Efficient Batching**: Configurable batch size for efficient processing
 - **Rich Metadata**: Attaches S3 bucket, key, and AWS resource attributes to all logs
 
 ### Supported Log Formats

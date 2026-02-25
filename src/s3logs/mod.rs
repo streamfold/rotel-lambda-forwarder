@@ -3,7 +3,7 @@ use aws_sdk_s3::Client as S3Client;
 use opentelemetry_proto::tonic::logs::v1::ResourceLogs;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
-use tracing::{error, info};
+use tracing::{debug, error};
 
 use crate::aws_attributes::AwsAttributes;
 
@@ -80,7 +80,7 @@ impl Parser {
         s3_event: S3Event,
         result_tx: mpsc::Sender<Vec<ResourceLogs>>,
     ) -> Result<(), ParserError> {
-        info!(
+        debug!(
             request_id = %self.request_id,
             records_count = s3_event.records.len(),
             "Starting to parse S3 event"
@@ -161,7 +161,7 @@ impl Parser {
             }
         }
 
-        info!(
+        debug!(
             request_id = %self.request_id,
             resource_logs_count = total_resource_logs,
             "Successfully parsed S3 event"

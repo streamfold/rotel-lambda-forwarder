@@ -9,7 +9,7 @@ use opentelemetry_proto::tonic::{
     logs::v1::{ResourceLogs, ScopeLogs},
     resource::v1::Resource,
 };
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::aws_attributes::AwsAttributes;
 use crate::parse::cwlogs::{LogPlatform, ParserType};
@@ -50,7 +50,7 @@ impl S3Record {
     /// Process the S3 record and return ResourceLogs
     pub async fn process(self) -> Result<Vec<ResourceLogs>, ParserError> {
         // Log S3 event record properties
-        info!(
+        debug!(
             request_id = %self.request_id,
             record_index = self.idx,
             event_version = %self.record.event_version.as_deref().unwrap_or("unknown"),
@@ -275,7 +275,7 @@ fn parse_log_lines(
         resource_logs_list.push(resource_logs);
     }
 
-    info!(
+    debug!(
         request_id = %request_id,
         total_lines = lines_count,
         resource_logs_count = resource_logs_list.len(),
@@ -344,7 +344,7 @@ fn parse_json_blob(
         resource_logs_list.push(resource_logs);
     }
 
-    info!(
+    debug!(
         request_id = %request_id,
         total_records = records_count,
         resource_logs_count = resource_logs_list.len(),

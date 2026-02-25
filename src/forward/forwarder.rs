@@ -6,7 +6,7 @@ use aws_sdk_s3::Client as S3Client;
 use opentelemetry_proto::tonic::logs::v1::ResourceLogs;
 use rotel::bounded_channel::BoundedSender;
 use rotel::topology::payload::{Message, MessageMetadata};
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
 use crate::aws_attributes::AwsAttributes;
 use crate::events::{LambdaEvent, LambdaPayload};
@@ -130,7 +130,7 @@ impl Forwarder {
         aws_attributes: &AwsAttributes,
         context: &lambda_runtime::Context,
     ) -> Result<AckerWaiter, lambda_runtime::Error> {
-        info!(
+        debug!(
             request_id = %context.request_id,
             records_count = s3_event.records.len(),
             "Handling S3 event notification"
@@ -202,7 +202,7 @@ impl Forwarder {
             }
         }
 
-        info!(
+        debug!(
             request_id = %context.request_id,
             count = count,
             "Successfully parsed and sent S3 logs"

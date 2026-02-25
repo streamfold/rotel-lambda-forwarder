@@ -88,12 +88,13 @@ impl Forwarder {
             }
         };
 
-        // Send each ResourceLogs to the channel
+        // Split into a counter (incremented per message) and a waiter (joined by the runtime).
+        // The drain task is spawned inside into_parts(), so ack senders are never blocked.
+        let (mut counter, waiter) = AckerBuilder::new(context.request_id.clone()).into_parts();
         let count = resource_logs.len();
-        let mut acker = AckerBuilder::new(context.request_id.clone(), count);
 
         for log in resource_logs {
-            let md = MessageMetadata::forwarder(acker.increment());
+            let md = MessageMetadata::forwarder(counter.increment());
             if let Err(e) = self
                 .logs_tx
                 .send(Message::new(Some(md), vec![log], None))
@@ -117,7 +118,10 @@ impl Forwarder {
             "Successfully parsed and sent logs"
         );
 
-        Ok(acker.finish())
+        // counter is dropped here (before the return value reaches the caller),
+        // allowing the drain task to observe the channel closing once all
+        // ForwarderMetadata senders have also been consumed downstream.
+        Ok(waiter)
     }
 
     async fn handle_s3_logs(
@@ -147,10 +151,9 @@ impl Forwarder {
         // Spawn the parse task so it runs concurrently with the forwarding loop below.
         let parse_handle = tokio::spawn(async move { parser.parse(s3_event, result_tx).await });
 
-        // The acker channel only carries small acknowledgement signals back from the exporter.
-        // We don't know the exact count yet, so use a generous capacity that avoids back-pressure
-        // on ack senders while the AckerWaiter is being drained by the runtime.
-        let mut acker = AckerBuilder::new(context.request_id.clone(), 10_000);
+        // Split into counter + waiter. The drain task starts immediately inside into_parts(),
+        // so ack senders are never blocked regardless of how many messages are in flight.
+        let (mut counter, waiter) = AckerBuilder::new(context.request_id.clone()).into_parts();
         let mut count: usize = 0;
 
         // Forward each batch to logs_tx as it arrives — this runs concurrently with the parse
@@ -158,7 +161,7 @@ impl Forwarder {
         while let Some(logs) = result_rx.recv().await {
             for log in logs {
                 count += 1;
-                let md = MessageMetadata::forwarder(acker.increment());
+                let md = MessageMetadata::forwarder(counter.increment());
                 if let Err(e) = self
                     .logs_tx
                     .send(Message::new(Some(md), vec![log], None))
@@ -205,7 +208,10 @@ impl Forwarder {
             "Successfully parsed and sent S3 logs"
         );
 
-        Ok(acker.finish())
+        // counter is dropped here (before the return value reaches the caller),
+        // allowing the drain task to observe the channel closing once all
+        // ForwarderMetadata senders have also been consumed downstream.
+        Ok(waiter)
     }
 }
 

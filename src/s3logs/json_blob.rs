@@ -112,7 +112,10 @@ mod tests {
 
         // Verify nested object
         let user_identity = record.get("userIdentity").unwrap().as_object().unwrap();
-        assert_eq!(user_identity.get("type").unwrap().as_str().unwrap(), "AssumedRole");
+        assert_eq!(
+            user_identity.get("type").unwrap().as_str().unwrap(),
+            "AssumedRole"
+        );
     }
 
     #[test]

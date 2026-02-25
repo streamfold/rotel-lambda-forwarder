@@ -1,3 +1,4 @@
+use aws_sdk_s3::config::timeout::TimeoutConfig;
 use clap::Parser;
 use http::Response;
 use http_body_util::BodyExt;
@@ -29,8 +30,10 @@ use tokio_util::sync::CancellationToken;
 use tower::BoxError;
 use tracing::{debug, error, info, trace, warn};
 
+// Make configurable as needed
 pub const SENDING_QUEUE_SIZE: usize = 10;
 pub const LOGS_QUEUE_SIZE: usize = 50;
+pub const S3_OPERATION_TIMEOUT_SECS: u64 = 20; // total timeout, including all retries
 
 #[derive(Debug, Parser)]
 #[command(name = "rotel-lambda-forwarder")]
@@ -178,7 +181,14 @@ async fn run_forwarder(
     let cw_client = aws_sdk_cloudwatchlogs::Client::new(&aws_config);
 
     // Create S3 client - always needed for S3 event processing
-    let s3_client = aws_sdk_s3::Client::new(&aws_config);
+    let s3_timeout_config = TimeoutConfig::builder()
+        .operation_timeout(Duration::from_secs(S3_OPERATION_TIMEOUT_SECS))
+        .build();
+    let s3_client = aws_sdk_s3::Client::from_conf(
+        aws_sdk_s3::config::Builder::from(&aws_config)
+            .timeout_config(s3_timeout_config)
+            .build(),
+    );
 
     let (s3_client_for_cache, s3_client_clone, s3_bucket_name, s3_bucket_clone) =
         if let Some(bucket) = s3_bucket {

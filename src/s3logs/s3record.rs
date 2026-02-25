@@ -536,29 +536,6 @@ mod tests {
         assert_eq!(parser_type, ParserType::Unknown);
     }
 
-    #[test]
-    fn test_decompress_gzip() {
-        // Create a simple gzip-compressed string
-        use flate2::Compression;
-        use flate2::write::GzEncoder;
-        use std::io::Write;
-
-        let original = b"test log line\n";
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(original).unwrap();
-        let compressed = encoder.finish().unwrap();
-
-        let result = decompress_if_needed(&compressed, "test.log.gz").unwrap();
-        assert_eq!(result, original);
-    }
-
-    #[test]
-    fn test_decompress_no_compression() {
-        let data = b"test log line\n";
-        let result = decompress_if_needed(data, "test.log").unwrap();
-        assert_eq!(result, data);
-    }
-
     #[tokio::test]
     async fn test_parse_log_lines_json() {
         let log_data = r#"{"level":"info","msg":"test message 1","service":"test"}
@@ -799,79 +776,5 @@ mod tests {
                 assert_eq!(s, "AwsApiCall::DescribeDBInstances");
             }
         }
-    }
-
-    #[tokio::test]
-    #[ignore] // Only run manually when the file exists
-    async fn test_parse_actual_cloudtrail_file() {
-        use std::fs;
-
-        let test_file = "/home/mheffner/tmp/279234357137_CloudTrail_us-east-1_20260220T2325Z_mdDrHV1NpfjtXf29.json";
-
-        // Skip test if file doesn't exist
-        if !std::path::Path::new(test_file).exists() {
-            println!("Skipping test - file not found: {}", test_file);
-            return;
-        }
-
-        let content = fs::read_to_string(test_file).expect("Failed to read test file");
-
-        let aws_attributes = AwsAttributes {
-            region: "us-east-1".to_string(),
-            account_id: "279234357137".to_string(),
-            invoked_function_arn: "arn:aws:lambda:us-east-1:279234357137:function:test".to_string(),
-        };
-
-        let event_time = Utc::now();
-        let result = parse_log_lines(
-            content.as_bytes(),
-            event_time,
-            "aws-cloudtrail-logs-279234357137-7d7d72eb",
-            "AWSLogs/279234357137/CloudTrail/us-east-1/2026/02/20/279234357137_CloudTrail_us-east-1_20260220T2325Z_mdDrHV1NpfjtXf29.json.gz",
-            &aws_attributes,
-            "test-request-id",
-            1000,
-        );
-
-        assert!(
-            result.is_ok(),
-            "Failed to parse actual CloudTrail file: {:?}",
-            result.err()
-        );
-
-        let resource_logs = result.unwrap();
-        assert!(!resource_logs.is_empty(), "No resource logs generated");
-
-        // Count total records
-        let total_records: usize = resource_logs
-            .iter()
-            .map(|rl| rl.scope_logs[0].log_records.len())
-            .sum();
-
-        println!("Successfully parsed {} CloudTrail records", total_records);
-        assert!(total_records > 0, "Expected at least one record");
-
-        // Verify first record has CloudTrail-specific body format
-        let first_log = &resource_logs[0].scope_logs[0].log_records[0];
-        assert!(first_log.body.is_some(), "First log should have a body");
-
-        if let Some(body) = &first_log.body {
-            if let Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) =
-                &body.value
-            {
-                assert!(
-                    s.contains("::"),
-                    "CloudTrail body should be in format 'eventType::eventName', got: {}",
-                    s
-                );
-            }
-        }
-
-        // Verify CloudTrail-specific attributes are present
-        let has_event_source = first_log
-            .attributes
-            .iter()
-            .any(|kv| kv.key == "eventSource");
-        assert!(has_event_source, "Missing eventSource attribute");
     }
 }

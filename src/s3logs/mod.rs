@@ -1,6 +1,7 @@
 use aws_lambda_events::s3::S3Event;
 use aws_sdk_s3::Client as S3Client;
 use opentelemetry_proto::tonic::logs::v1::ResourceLogs;
+use tokio::task::JoinSet;
 use tracing::{error, info};
 
 use crate::aws_attributes::AwsAttributes;
@@ -77,7 +78,7 @@ impl Parser {
         let mut all_resource_logs = Vec::new();
 
         // Process records in parallel with controlled concurrency
-        let mut tasks = Vec::new();
+        let mut tasks = JoinSet::new();
         let max_concurrent = self.config.max_parallel_objects;
 
         for (idx, record) in s3_event.records.into_iter().enumerate() {
@@ -86,18 +87,17 @@ impl Parser {
             let request_id = self.request_id.clone();
             let batch_size = self.config.batch_size;
 
-            // Wait if we've hit the concurrency limit
-            if tasks.len() >= max_concurrent {
-                if let Some(result) = tasks.pop() {
-                    match result.await {
-                        Ok(Ok(logs)) => all_resource_logs.extend(logs),
-                        Ok(Err(e)) => {
-                            error!(error = %e, "Failed to process S3 object");
-                        }
-                        Err(e) => {
-                            error!(error = %e, "Task panicked while processing S3 object");
-                        }
+            // Wait for the first task to finish if we've hit the concurrency limit
+            while tasks.len() >= max_concurrent {
+                match tasks.join_next().await {
+                    Some(Ok(Ok(logs))) => all_resource_logs.extend(logs),
+                    Some(Ok(Err(e))) => {
+                        error!(error = %e, "Failed to process S3 object");
                     }
+                    Some(Err(e)) => {
+                        error!(error = %e, "Task panicked while processing S3 object");
+                    }
+                    None => break,
                 }
             }
 
@@ -110,14 +110,12 @@ impl Parser {
                 batch_size,
             );
 
-            let task = tokio::spawn(async move { s3_record.process().await });
-
-            tasks.push(task);
+            tasks.spawn(async move { s3_record.process().await });
         }
 
         // Wait for remaining tasks
-        for task in tasks {
-            match task.await {
+        while let Some(result) = tasks.join_next().await {
+            match result {
                 Ok(Ok(logs)) => all_resource_logs.extend(logs),
                 Ok(Err(e)) => {
                     error!(error = %e, "Failed to process S3 object");

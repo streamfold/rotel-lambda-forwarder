@@ -1,6 +1,7 @@
 use aws_lambda_events::s3::S3Event;
 use aws_sdk_s3::Client as S3Client;
 use opentelemetry_proto::tonic::logs::v1::ResourceLogs;
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tracing::{error, info};
 
@@ -67,18 +68,28 @@ impl Parser {
         }
     }
 
-    /// Parse an S3 event and return ResourceLogs
-    pub async fn parse(&self, s3_event: S3Event) -> Result<Vec<ResourceLogs>, ParserError> {
+    /// Parse an S3 event, streaming batches of ResourceLogs to `result_tx` as each S3 object
+    /// completes. This enables the caller to pipeline downstream processing (batching, exporting)
+    /// concurrently with ongoing S3 reads.
+    ///
+    /// Returns `Ok(())` once all S3 objects have been processed. Individual object errors are
+    /// logged but do not abort processing of remaining objects. A send error (receiver dropped)
+    /// causes an early return with `Err`.
+    pub async fn parse(
+        &self,
+        s3_event: S3Event,
+        result_tx: mpsc::Sender<Vec<ResourceLogs>>,
+    ) -> Result<(), ParserError> {
         info!(
             request_id = %self.request_id,
             records_count = s3_event.records.len(),
             "Starting to parse S3 event"
         );
 
-        let mut all_resource_logs = Vec::new();
+        let mut total_resource_logs: usize = 0;
 
         // Process records in parallel with controlled concurrency
-        let mut tasks = JoinSet::new();
+        let mut tasks: JoinSet<Result<Vec<ResourceLogs>, ParserError>> = JoinSet::new();
         let max_concurrent = self.config.max_parallel_objects;
 
         for (idx, record) in s3_event.records.into_iter().enumerate() {
@@ -87,10 +98,23 @@ impl Parser {
             let request_id = self.request_id.clone();
             let batch_size = self.config.batch_size;
 
-            // Wait for the first task to finish if we've hit the concurrency limit
+            // Wait for the first task to finish if we've hit the concurrency limit, then
+            // stream its results immediately rather than accumulating them.
             while tasks.len() >= max_concurrent {
                 match tasks.join_next().await {
-                    Some(Ok(Ok(logs))) => all_resource_logs.extend(logs),
+                    Some(Ok(Ok(logs))) => {
+                        total_resource_logs += logs.len();
+                        if result_tx.send(logs).await.is_err() {
+                            // Receiver was dropped; the caller has given up — stop processing.
+                            error!(
+                                request_id = %self.request_id,
+                                "Result receiver dropped; aborting S3 parse"
+                            );
+                            return Err(ParserError::ParseError(
+                                "Result receiver dropped".to_string(),
+                            ));
+                        }
+                    }
                     Some(Ok(Err(e))) => {
                         error!(error = %e, "Failed to process S3 object");
                     }
@@ -113,10 +137,21 @@ impl Parser {
             tasks.spawn(async move { s3_record.process().await });
         }
 
-        // Wait for remaining tasks
+        // Drain remaining tasks, streaming each result as it completes.
         while let Some(result) = tasks.join_next().await {
             match result {
-                Ok(Ok(logs)) => all_resource_logs.extend(logs),
+                Ok(Ok(logs)) => {
+                    total_resource_logs += logs.len();
+                    if result_tx.send(logs).await.is_err() {
+                        error!(
+                            request_id = %self.request_id,
+                            "Result receiver dropped; aborting S3 parse"
+                        );
+                        return Err(ParserError::ParseError(
+                            "Result receiver dropped".to_string(),
+                        ));
+                    }
+                }
                 Ok(Err(e)) => {
                     error!(error = %e, "Failed to process S3 object");
                 }
@@ -128,11 +163,11 @@ impl Parser {
 
         info!(
             request_id = %self.request_id,
-            resource_logs_count = all_resource_logs.len(),
+            resource_logs_count = total_resource_logs,
             "Successfully parsed S3 event"
         );
 
-        Ok(all_resource_logs)
+        Ok(())
     }
 }
 

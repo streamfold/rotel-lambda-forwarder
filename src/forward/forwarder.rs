@@ -139,10 +139,49 @@ impl Forwarder {
 
         let parser = s3logs::Parser::new(aws_attributes, &context.request_id, s3_client);
 
-        // Parse the S3 event and load log files
-        let resource_logs = match parser.parse(s3_event).await {
-            Ok(logs) => logs,
-            Err(e) => {
+        // Create a channel so the parse task can stream batches of ResourceLogs to us as each
+        // S3 object completes, rather than waiting for all objects before forwarding anything.
+        // Buffer depth matches typical max-parallel-objects (default 5) with some headroom.
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::channel::<Vec<ResourceLogs>>(32);
+
+        // Spawn the parse task so it runs concurrently with the forwarding loop below.
+        let parse_handle = tokio::spawn(async move { parser.parse(s3_event, result_tx).await });
+
+        // The acker channel only carries small acknowledgement signals back from the exporter.
+        // We don't know the exact count yet, so use a generous capacity that avoids back-pressure
+        // on ack senders while the AckerWaiter is being drained by the runtime.
+        let mut acker = AckerBuilder::new(context.request_id.clone(), 10_000);
+        let mut count: usize = 0;
+
+        // Forward each batch to logs_tx as it arrives — this runs concurrently with the parse
+        // task, giving downstream batching / exporting a head-start before parsing is complete.
+        while let Some(logs) = result_rx.recv().await {
+            for log in logs {
+                count += 1;
+                let md = MessageMetadata::forwarder(acker.increment());
+                if let Err(e) = self
+                    .logs_tx
+                    .send(Message::new(Some(md), vec![log], None))
+                    .await
+                {
+                    error!(
+                        request_id = %context.request_id,
+                        error = %e,
+                        "Failed to send logs to channel"
+                    );
+                    return Err(lambda_runtime::Error::from(format!(
+                        "Failed to send logs: {}",
+                        e
+                    )));
+                }
+            }
+        }
+
+        // The result_rx loop above ends only after result_tx is dropped, which happens when the
+        // parse task exits. Join here to surface any parse errors.
+        match parse_handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
                 error!(
                     request_id = %context.request_id,
                     error = %e,
@@ -150,28 +189,13 @@ impl Forwarder {
                 );
                 return Err(lambda_runtime::Error::from(e.to_string()));
             }
-        };
-
-        // Send each ResourceLogs to the channel
-        let count = resource_logs.len();
-        let mut acker = AckerBuilder::new(context.request_id.clone(), count);
-
-        for log in resource_logs {
-            let md = MessageMetadata::forwarder(acker.increment());
-            if let Err(e) = self
-                .logs_tx
-                .send(Message::new(Some(md), vec![log], None))
-                .await
-            {
+            Err(e) => {
                 error!(
                     request_id = %context.request_id,
                     error = %e,
-                    "Failed to send logs to channel"
+                    "S3 parse task panicked"
                 );
-                return Err(lambda_runtime::Error::from(format!(
-                    "Failed to send logs: {}",
-                    e
-                )));
+                return Err(lambda_runtime::Error::from(e.to_string()));
             }
         }
 

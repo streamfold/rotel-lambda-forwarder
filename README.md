@@ -60,7 +60,7 @@ The deployed Lambda function supports both CloudWatch Logs subscriptions and S3 
 
 - [CloudWatch Logs Subcription](#setting-up-cloudWatch-logs-subscription): Configure a CloudWatch Logs subscription to send logs to the Lambda function
 - [S3 Event Notification](#s3-log-processing): Configure S3 notification to trigger the Lambda function
- 
+
 #### Export to OTLP endpoint
 
 Launch this stack to export CloudWatch logs to any OTLP compatible endpoint.
@@ -639,7 +639,7 @@ Configure the S3 log processor using these environment variables:
 | Variable                            | Description                                          | Default |
 | ----------------------------------- | ---------------------------------------------------- | ------- |
 | `FORWARDER_S3_MAX_PARALLEL_OBJECTS` | Maximum number of S3 objects to process concurrently | `5`     |
-| `FORWARDER_S3_BATCH_SIZE`           | Number of log records to batch before sending        | `1000`  |
+| `FORWARDER_S3_BATCH_SIZE`           | Number of log records to batch per ResourceLog       | `1000`  |
 
 ### Setup
 

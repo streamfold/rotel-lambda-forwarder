@@ -1,10 +1,10 @@
 # Rotel Lambda Forwarder
 
-An AWS Lambda function written in Rust that forwards CloudWatch Logs and S3-stored logs to OpenTelemetry-compatible backends. This function receives CloudWatch Logs events via subscription filters or S3 event notifications, transforms them into OpenTelemetry log format, and exports them using the [Rotel](https://github.com/streamfold/rotel) agent. This is built on the existing Rotel OpenTelemetry data plane, so logs can be exported to any [supported exporter](https://rotel.dev/docs/category/exporters).
+An AWS Lambda function written in Rust that forwards CloudWatch and S3-stored logs to OpenTelemetry-compatible backends. This function receives requests triggered by either CloudWatch Logs subscription filters or S3 event notifications, transforms them into OpenTelemetry log format, and exports them using the [Rotel](https://github.com/streamfold/rotel) agent. This is built on the existing Rotel OpenTelemetry data plane, so logs can be exported to any [supported exporter](https://rotel.dev/docs/category/exporters). Logs can be filtered, transformed, or enriched by adding small processor functions written in Python.
 
 ---
 
-By leveraging the high-performance Rotel data plane, Rotel Lambda Forwarder can transform CloudWatch logs at high-volume while minimizing Lambda runtime duration costs.
+By leveraging the high-performance Rotel data plane, Rotel Lambda Forwarder can transform logs at high-volume while minimizing Lambda runtime duration costs.
 ![Invocation Performance](./contrib/invocation_perf.png)
 _Performance of 12 hours of VPC flow log forwarding to ClickHouse Cloud. Average invocation latency stays under 150ms._
 
@@ -12,13 +12,12 @@ _Performance of 12 hours of VPC flow log forwarding to ClickHouse Cloud. Average
 
 - **OpenTelemetry Native**: Transforms all logs to OpenTelemetry format
 - **Multiple Log Sources**: Supports both CloudWatch Logs subscriptions and S3 event notifications
-- **S3 Log Processing**: Automatically processes log files stored in S3 with compression support
 - **Multiple Export Targets**: Supports OTLP HTTP/gRPC and other exporters via Rotel
 - **Python Log Processors**: Filter, transform, and enrich logs with Python before exporting
 - **Automatic parsing**: Support for JSON and key=value parsing, with automatic detection
 - **Log stream parser mapping**: Pre-built parser rules for known AWS CW log groups/streams
-- **AWS Resource Attributes**: Automatically enriches logs with AWS Lambda and CloudWatch log group tags
-- **Reliable delivery**: Ensures logs are delivered successfully before acknowledging request
+- **AWS Resource Attributes**: Automatically enriches logs with AWS Lambda metadata and resource tags
+- **Reliable delivery**: Ensures logs are delivered successfully
 
 ## Supported services
 
@@ -53,12 +52,15 @@ There are two deployment methods available:
 
 ### Deploy with CloudFormation (Docker Container - Recommended)
 
-The CloudFormation templates automatically pull container images from Amazon ECR Public and copy them to your private ECR repository.
+The CloudFormation templates automatically pull container images from the Rotel Amazon ECR Public repository and copy them to a private ECR repository.
 
 **Note:** Python log processors are only supported when using the Docker container deployment method.
 
-The deployed Lambda function supports both CloudWatch Logs subscriptions and S3 event notifications. To use S3 log processing, configure S3 event notifications to trigger the Lambda function after deployment (see [S3 Log Processing](#s3-log-processing) section).
+The deployed Lambda function supports both CloudWatch Logs subscriptions and S3 event notifications.
 
+- [CloudWatch Logs Subcription](#setting-up-cloudWatch-logs-subscription): Configure a CloudWatch Logs subscription to send logs to the Lambda function
+- [S3 Event Notification](#s3-log-processing): Configure S3 notification to trigger the Lambda function
+ 
 #### Export to OTLP endpoint
 
 Launch this stack to export CloudWatch logs to any OTLP compatible endpoint.

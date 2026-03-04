@@ -66,7 +66,7 @@ impl RecordParser {
     /// If parsing fails, the message is treated as plain text.
     pub(crate) fn parse(&self, now_nanos: u64, log_entry: RecordLogEntry) -> LogRecord {
         let mut lr = LogRecord {
-            time_unix_nano: (log_entry.timestamp * 1_000_000) as u64,
+            time_unix_nano: timestamp_ms_to_ns(log_entry.timestamp, now_nanos),
             observed_time_unix_nano: now_nanos,
             ..Default::default()
         };
@@ -114,7 +114,7 @@ impl RecordParser {
         mut json_map: serde_json::Map<String, JsonValue>,
     ) -> LogRecord {
         let mut lr = LogRecord {
-            time_unix_nano: (timestamp * 1_000_000) as u64,
+            time_unix_nano: timestamp_ms_to_ns(timestamp, now_nanos),
             observed_time_unix_nano: now_nanos,
             ..Default::default()
         };
@@ -263,6 +263,16 @@ impl RecordParser {
             });
         }
     }
+}
+
+/// Convert a millisecond timestamp to nanoseconds, falling back on overflow or
+/// negative values.
+fn timestamp_ms_to_ns(timestamp_ms: i64, fallback_ns: u64) -> u64 {
+    timestamp_ms
+        .checked_mul(1_000_000)
+        .filter(|&ns| ns >= 0)
+        .map(|ns| ns as u64)
+        .unwrap_or(fallback_ns)
 }
 
 /// Hex decode utilities

@@ -278,9 +278,17 @@ fn parse_timestamp(value: &JsonValue) -> Option<u64> {
             if let Some(ts_float) = n.as_f64() {
                 // Heuristic: if > 1e12, assume milliseconds, otherwise seconds
                 if ts_float > 1e12 {
-                    Some((ts_float * 1_000.0) as u64)
+                    let millis = ts_float * 1_000.0;
+                    if millis < 0.0 || millis > u64::MAX as f64 {
+                        return None;
+                    }
+                    Some(millis as u64)
                 } else {
-                    Some((ts_float * 1_000_000_000.0) as u64)
+                    let nanos = ts_float * 1_000_000_000.0;
+                    if nanos < 0.0 || nanos > u64::MAX as f64 {
+                        return None;
+                    }
+                    Some(nanos as u64)
                 }
             } else {
                 None
@@ -581,5 +589,80 @@ mod tests {
                 panic!("Expected StringValue in body");
             }
         }
+    }
+
+    #[test]
+    fn test_parse_timestamp_seconds() {
+        // A normal Unix timestamp in seconds (< 1e12) should be converted to nanoseconds
+        let value = JsonValue::Number(serde_json::Number::from_f64(1704110400.0).unwrap());
+        let result = parse_timestamp(&value);
+        assert_eq!(result, Some(1704110400_000_000_000u64));
+    }
+
+    #[test]
+    fn test_parse_timestamp_milliseconds() {
+        // A Unix timestamp in milliseconds (> 1e12) should be converted to nanoseconds
+        let value = JsonValue::Number(serde_json::Number::from_f64(1704110400_000.0).unwrap());
+        let result = parse_timestamp(&value);
+        assert_eq!(result, Some(1704110400_000_000u64));
+    }
+
+    #[test]
+    fn test_parse_timestamp_seconds_overflow() {
+        // A seconds value so large that multiplying by 1_000_000_000 overflows u64
+        // u64::MAX is ~1.84e19, so 1e11 * 1e9 = 1e20 overflows
+        let value = JsonValue::Number(serde_json::Number::from_f64(1e11).unwrap());
+        let result = parse_timestamp(&value);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_timestamp_milliseconds_overflow() {
+        // A milliseconds value so large that multiplying by 1_000 overflows u64
+        // u64::MAX is ~1.84e19, so 1e19 * 1e3 = 1e22 overflows
+        let value = JsonValue::Number(serde_json::Number::from_f64(1e19).unwrap());
+        let result = parse_timestamp(&value);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_timestamp_negative_seconds() {
+        // Negative timestamps should return None
+        let value = JsonValue::Number(serde_json::Number::from_f64(-1.0).unwrap());
+        let result = parse_timestamp(&value);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_timestamp_negative_milliseconds() {
+        // Negative millisecond timestamps (< -1e12) should return None
+        let value = JsonValue::Number(serde_json::Number::from_f64(-2e12).unwrap());
+        let result = parse_timestamp(&value);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_timestamp_rfc3339_string() {
+        // A valid RFC3339 string should be parsed correctly
+        let value = JsonValue::String("2024-01-01T12:00:00Z".to_string());
+        let result = parse_timestamp(&value);
+        assert!(result.is_some());
+        assert!(result.unwrap() > 0);
+    }
+
+    #[test]
+    fn test_parse_timestamp_invalid_string() {
+        // An invalid string should return None
+        let value = JsonValue::String("not-a-timestamp".to_string());
+        let result = parse_timestamp(&value);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_timestamp_non_number() {
+        // A boolean JSON value should return None
+        let value = JsonValue::Bool(true);
+        let result = parse_timestamp(&value);
+        assert_eq!(result, None);
     }
 }

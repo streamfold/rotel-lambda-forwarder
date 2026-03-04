@@ -86,7 +86,7 @@ impl RecordParser {
         let json_map = self.parse_message_to_map(message, &mut lr);
 
         match json_map {
-            Ok(None) => {}
+            Ok(None) => return lr,
             Ok(Some(mut map)) => {
                 self.field_stripper.strip_fields(&mut map);
 

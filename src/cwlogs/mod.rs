@@ -2,7 +2,7 @@ use regex::Regex;
 use std::sync::LazyLock;
 use std::{collections::HashMap, sync::Arc};
 
-use aws_lambda_events::cloudwatch_logs::{LogEntry, LogsEvent};
+use aws_lambda_events::cloudwatch_logs::LogsEvent;
 use opentelemetry_proto::tonic::{
     common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value::Value},
     logs::v1::{ResourceLogs, ScopeLogs},
@@ -10,13 +10,16 @@ use opentelemetry_proto::tonic::{
 };
 use tracing::debug;
 
-use crate::parse::record_parser::RecordLogEntry;
+use crate::parse::platform::{LogPlatform, ParserError, ParserType};
 use crate::{
     aws_attributes::AwsAttributes,
     flowlogs::{FlowLogManager, ParsedFields},
-    parse::record_parser::RecordParser,
     tags::TagManager,
 };
+
+pub mod record_parser;
+
+use record_parser::RecordParser;
 
 /// Parser handles the conversion of AWS CloudWatch Logs events into OpenTelemetry ResourceLogs
 pub struct Parser<'a> {
@@ -43,28 +46,6 @@ impl<'a> Parser<'a> {
 
     /// Parse an AWS CloudWatch Logs event and return ResourceLogs
     pub async fn parse(&mut self, logs_event: LogsEvent) -> Result<Vec<ResourceLogs>, ParserError> {
-        debug!(
-            request_id = %self.request_id,
-            "Starting to parse CloudWatch Logs event"
-        );
-
-        // Parse the CloudWatch Logs event into ResourceLogs
-        let resource_logs = self.parse_logs_event(logs_event).await?;
-
-        debug!(
-            request_id = %self.request_id,
-            count = resource_logs.len(),
-            "Successfully parsed CloudWatch Logs event into ResourceLogs"
-        );
-
-        Ok(resource_logs)
-    }
-
-    /// Internal method to parse the LogsEvent
-    async fn parse_logs_event(
-        &mut self,
-        logs_event: LogsEvent,
-    ) -> Result<Vec<ResourceLogs>, ParserError> {
         let mut resource_logs_list = Vec::new();
 
         debug!(
@@ -172,7 +153,7 @@ impl<'a> Parser<'a> {
         let log_records = log_data
             .log_events
             .into_iter()
-            .map(|log| rec_parser.parse(now_nanos, log.into()))
+            .map(|log| rec_parser.parse(now_nanos, log))
             .collect();
 
         let resource_logs = ResourceLogs {
@@ -183,8 +164,8 @@ impl<'a> Parser<'a> {
             }),
             scope_logs: vec![ScopeLogs {
                 scope: Some(InstrumentationScope {
-                    name: "rotel-lambda-forwarder".to_string(),
-                    version: "0.0.1".to_string(), // TODO
+                    name: env!("CARGO_PKG_NAME").to_string(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
                     attributes: vec![KeyValue {
                         key: "aws.lambda.invoked_arn".to_string(),
                         value: Some(AnyValue {
@@ -204,104 +185,6 @@ impl<'a> Parser<'a> {
         resource_logs_list.push(resource_logs);
 
         Ok(resource_logs_list)
-    }
-}
-
-impl From<LogEntry> for RecordLogEntry {
-    fn from(value: LogEntry) -> Self {
-        RecordLogEntry::new(Some(value.id), value.timestamp, value.message)
-    }
-}
-
-/// Detect AWS platform from log group name
-/// Represents the AWS platform/service that generated the logs
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogPlatform {
-    Eks,
-    Ecs,
-    Rds,
-    Lambda,
-    Codebuild,
-    Cloudtrail,
-    VpcFlowLog,
-    Unknown,
-}
-
-impl LogPlatform {
-    /// Returns the platform string used in cloud.platform attribute
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            LogPlatform::Eks => "aws_eks",
-            LogPlatform::Ecs => "aws_ecs",
-            LogPlatform::Rds => "aws_rds",
-            LogPlatform::Lambda => "aws_lambda",
-            LogPlatform::Codebuild => "aws_codebuild",
-            LogPlatform::Cloudtrail => "aws_cloudtrail",
-            LogPlatform::VpcFlowLog => "aws_vpc_flow_log",
-            LogPlatform::Unknown => "aws_unknown",
-        }
-    }
-}
-
-/// Represents the type of parser to use for log entries
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParserType {
-    Json,
-    KeyValue,
-    VpcLog,
-    #[default]
-    Unknown,
-}
-
-impl<'a> Parser<'a> {
-    /// Detects the log platform and parser type based on log group and stream names
-    /// Returns (platform, parser_type, optional_flow_log_parsed_fields, flow_log_tags)
-    async fn detect_log_type(
-        &mut self,
-        log_group_name: &str,
-        log_stream_name: &str,
-    ) -> (
-        LogPlatform,
-        ParserType,
-        Option<Arc<ParsedFields>>,
-        HashMap<String, String>,
-    ) {
-        // First check if this is an EC2 Flow Log
-        if let Some(flow_log_config) = self.flow_log_manager.get_config(log_group_name).await {
-            debug!(
-                log_group = %log_group_name,
-                flow_log_id = %flow_log_config.flow_log_id,
-                "Detected EC2 Flow Log"
-            );
-
-            // Extract parsed fields if successful, None if parsing failed or not attempted
-            let parsed_fields = flow_log_config.parsed_fields.as_ref().cloned();
-
-            return (
-                LogPlatform::VpcFlowLog,
-                ParserType::VpcLog,
-                parsed_fields,
-                flow_log_config.tags,
-            );
-        }
-
-        // Otherwise, detect the platform normally
-        let platform = detect_log_platform(log_group_name, log_stream_name);
-
-        // Then, determine the parser type based on platform and log stream name
-        let parser_type = match platform {
-            LogPlatform::Eks => {
-                if log_stream_name.starts_with("authenticator-") {
-                    ParserType::KeyValue
-                } else {
-                    ParserType::Unknown
-                }
-            }
-            LogPlatform::Cloudtrail => ParserType::Json,
-            _ => ParserType::Unknown,
-        };
-
-        (platform, parser_type, None, HashMap::new())
     }
 }
 
@@ -332,31 +215,62 @@ fn detect_log_platform(log_group_name: &str, log_stream_name: &str) -> LogPlatfo
     }
 }
 
-/// Errors that can occur during parsing
-#[derive(Debug, thiserror::Error)]
-pub enum ParserError {
-    #[error("Failed to decode CloudWatch Logs data: {0}")]
-    DecodeError(String),
+impl<'a> Parser<'a> {
+    /// Detects the log platform and parser type based on log group and stream names.
+    /// Returns (platform, parser_type, optional_flow_log_parsed_fields, flow_log_tags)
+    async fn detect_log_type(
+        &mut self,
+        log_group_name: &str,
+        log_stream_name: &str,
+    ) -> (
+        LogPlatform,
+        ParserType,
+        Option<Arc<ParsedFields>>,
+        HashMap<String, String>,
+    ) {
+        // First check if this is an EC2 Flow Log
+        if let Some(flow_log_config) = self.flow_log_manager.get_config(log_group_name).await {
+            debug!(
+                log_group = %log_group_name,
+                flow_log_id = %flow_log_config.flow_log_id,
+                "Detected EC2 Flow Log"
+            );
 
-    #[error("Failed to decompress CloudWatch Logs data: {0}")]
-    DecompressionError(String),
+            let parsed_fields = flow_log_config.parsed_fields.as_ref().cloned();
 
-    #[error("Failed to parse JSON: {0}")]
-    JsonParseError(String),
+            return (
+                LogPlatform::VpcFlowLog,
+                ParserType::VpcLog,
+                parsed_fields,
+                flow_log_config.tags,
+            );
+        }
 
-    #[error("Invalid log format: {0}")]
-    FormatParseError(String),
+        // Otherwise, detect the platform normally
+        let platform = detect_log_platform(log_group_name, log_stream_name);
 
-    #[error("Unable to parse EC2 flow log format")]
-    FlowLogFormatError,
+        // Determine the parser type based on platform and log stream name
+        let parser_type = match platform {
+            LogPlatform::Eks => {
+                if log_stream_name.starts_with("authenticator-") {
+                    ParserType::KeyValue
+                } else {
+                    ParserType::Unknown
+                }
+            }
+            LogPlatform::Cloudtrail => ParserType::Json,
+            _ => ParserType::Unknown,
+        };
+
+        (platform, parser_type, None, HashMap::new())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use aws_lambda_events::cloudwatch_logs::LogEntry;
-
     use super::*;
     use aws_config::BehaviorVersion;
+    use aws_lambda_events::cloudwatch_logs::LogEntry;
 
     #[tokio::test]
     async fn test_parse_empty_event() {
@@ -381,7 +295,6 @@ mod tests {
 
         assert!(result.is_ok());
         let resource_logs = result.unwrap();
-        // Implementation creates one ResourceLogs structure
         assert_eq!(resource_logs.len(), 1);
     }
 
@@ -389,20 +302,17 @@ mod tests {
     async fn test_parse_eks_authenticator_log() {
         let log_msg = r#"time="2025-12-24T19:48:32Z" level=info msg="access granted" arn="arn:aws:iam::927209226484:role/AWSWesleyClusterManagerLambda-Add-AddonManagerRole-1CRTQUJF13T5U" client="127.0.0.1:54812" groups="[]" method=POST path=/authenticate stsendpoint=sts.us-east-1.amazonaws.com uid="aws-iam-authenticator:927209226484:AROA5PYP2AD2FVXU23CA6" username="eks:addon-manager""#;
 
-        // Test parsing the log entry
         let mut log_entry = LogEntry::default();
         log_entry.id = "test-id".to_string();
         log_entry.timestamp = 1000;
         log_entry.message = log_msg.to_string();
 
         let rec_parser = RecordParser::new(LogPlatform::Eks, ParserType::KeyValue, None);
-        let log_record = rec_parser.parse(123456789, log_entry.into());
+        let log_record = rec_parser.parse(123456789, log_entry);
 
-        // Verify the log was parsed correctly
         assert_eq!(log_record.severity_number, 9); // Info
         assert_eq!(log_record.severity_text, "INFO");
 
-        // Verify body contains the msg field
         assert!(log_record.body.is_some());
         if let Some(body) = &log_record.body {
             if let Some(Value::StringValue(s)) = &body.value {
@@ -410,17 +320,11 @@ mod tests {
             }
         }
 
-        // Verify timestamp was parsed
         assert!(log_record.time_unix_nano > 0);
 
-        // Verify attributes were extracted
-        let has_arn = log_record.attributes.iter().any(|kv| kv.key == "arn");
-        let has_method = log_record.attributes.iter().any(|kv| kv.key == "method");
-        let has_username = log_record.attributes.iter().any(|kv| kv.key == "username");
-
-        assert!(has_arn);
-        assert!(has_method);
-        assert!(has_username);
+        assert!(log_record.attributes.iter().any(|kv| kv.key == "arn"));
+        assert!(log_record.attributes.iter().any(|kv| kv.key == "method"));
+        assert!(log_record.attributes.iter().any(|kv| kv.key == "username"));
     }
 
     #[test]

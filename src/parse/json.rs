@@ -8,7 +8,7 @@
 use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value::Value};
 use serde_json::Value as JsonValue;
 
-use crate::parse::{cwlogs::ParserError, record_parser::RecordParserError};
+use crate::parse::{platform::ParserError, record_parser::RecordParserError};
 
 /// Parse a JSON log entry and return the parsed map
 /// Returns an error if the message is not valid JSON or not an object
@@ -90,8 +90,9 @@ pub fn json_value_to_any_value(value: JsonValue) -> AnyValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::cwlogs::{LogPlatform, ParserType};
-    use crate::parse::record_parser::{RecordParser, map_log_level};
+    use crate::cwlogs::record_parser::RecordParser;
+    use crate::parse::platform::{LogPlatform, ParserType};
+    use crate::parse::record_parser::map_log_level;
     use aws_lambda_events::cloudwatch_logs::LogEntry;
     use opentelemetry_proto::tonic::logs::v1::{LogRecord, SeverityNumber};
 

@@ -8,7 +8,7 @@
 use serde_json::Value as JsonValue;
 use tracing::debug;
 
-use crate::parse::{cwlogs::ParserError, record_parser::RecordParserError};
+use crate::parse::{platform::ParserError, record_parser::RecordParserError};
 
 /// Parse key-value pairs from a string and return as a serde_json::Map
 /// All values are stored as JsonValue::String
@@ -146,8 +146,8 @@ fn parse_keyvalue_pairs(input: &str) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::cwlogs::{LogPlatform, ParserType};
-    use crate::parse::record_parser::RecordParser;
+    use crate::cwlogs::record_parser::RecordParser;
+    use crate::parse::platform::{LogPlatform, ParserType};
     use aws_lambda_events::cloudwatch_logs::LogEntry;
     use opentelemetry_proto::tonic::{
         common::v1::any_value::Value,

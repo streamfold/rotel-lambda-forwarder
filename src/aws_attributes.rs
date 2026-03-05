@@ -1,5 +1,6 @@
 use lambda_runtime::Context;
 
+#[derive(Clone)]
 pub struct AwsAttributes {
     pub region: String,
     pub account_id: String,

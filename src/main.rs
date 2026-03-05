@@ -1,3 +1,4 @@
+use aws_sdk_s3::config::timeout::TimeoutConfig;
 use clap::Parser;
 use http::Response;
 use http_body_util::BodyExt;
@@ -29,8 +30,10 @@ use tokio_util::sync::CancellationToken;
 use tower::BoxError;
 use tracing::{debug, error, info, trace, warn};
 
+// Make configurable as needed
 pub const SENDING_QUEUE_SIZE: usize = 10;
 pub const LOGS_QUEUE_SIZE: usize = 50;
+pub const S3_OPERATION_TIMEOUT_SECS: u64 = 20; // total timeout, including all retries
 
 #[derive(Debug, Parser)]
 #[command(name = "rotel-lambda-forwarder")]
@@ -177,13 +180,22 @@ async fn run_forwarder(
     let aws_config = aws_config::load_from_env().await;
     let cw_client = aws_sdk_cloudwatchlogs::Client::new(&aws_config);
 
-    let (s3_client, s3_client_clone, s3_bucket_name, s3_bucket_clone) =
+    // Create S3 client - always needed for S3 event processing
+    let s3_timeout_config = TimeoutConfig::builder()
+        .operation_timeout(Duration::from_secs(S3_OPERATION_TIMEOUT_SECS))
+        .build();
+    let s3_client = aws_sdk_s3::Client::from_conf(
+        aws_sdk_s3::config::Builder::from(&aws_config)
+            .timeout_config(s3_timeout_config)
+            .build(),
+    );
+
+    let (s3_client_for_cache, s3_client_clone, s3_bucket_name, s3_bucket_clone) =
         if let Some(bucket) = s3_bucket {
             info!(bucket = %bucket, "Initializing managers with S3 cache");
-            let s3_client = aws_sdk_s3::Client::new(&aws_config);
             (
                 Some(s3_client.clone()),
-                Some(s3_client),
+                Some(s3_client.clone()),
                 Some(bucket.clone()),
                 Some(bucket),
             )
@@ -191,7 +203,7 @@ async fn run_forwarder(
             (None, None, None, None)
         };
 
-    let mut tag_manager = TagManager::new(cw_client, s3_client, s3_bucket_name);
+    let mut tag_manager = TagManager::new(cw_client, s3_client_for_cache, s3_bucket_name);
 
     // Load cache from S3 if available
     if let Err(e) = tag_manager.initialize().await {
@@ -213,7 +225,8 @@ async fn run_forwarder(
         // Don't fail startup, just log the error
     }
 
-    let mut forwarder = forward::Forwarder::new(logs_tx, tag_manager, flow_log_manager);
+    let mut forwarder =
+        forward::Forwarder::new(logs_tx, tag_manager, flow_log_manager, Some(s3_client));
 
     init_wait_rx
         .await

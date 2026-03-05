@@ -1,37 +1,40 @@
 # Rotel Lambda Forwarder
 
-An AWS Lambda function written in Rust that forwards CloudWatch Logs to OpenTelemetry-compatible backends. This function receives CloudWatch Logs events via subscription filters, transforms them into OpenTelemetry log format, and exports them using the [Rotel](https://github.com/streamfold/rotel) agent. This is built on the existing Rotel OpenTelemetry data plane, so logs can be exported to any [supported exporter](https://rotel.dev/docs/category/exporters).
+An AWS Lambda function written in Rust that forwards CloudWatch and S3-stored logs to OpenTelemetry-compatible backends. This function receives requests triggered by either CloudWatch Logs subscription filters or S3 event notifications, transforms them into OpenTelemetry log format, and exports them using the [Rotel](https://github.com/streamfold/rotel) agent. This is built on the existing Rotel OpenTelemetry data plane, so logs can be exported to any [supported exporter](https://rotel.dev/docs/category/exporters). Logs can be filtered, transformed, or enriched by adding small processor functions written in Python.
 
 ---
 
-By leveraging the high-performance Rotel data plane, Rotel Lambda Forwarder can transform CloudWatch logs at high-volume while minimizing Lambda runtime duration costs.
+By leveraging the high-performance Rotel data plane, Rotel Lambda Forwarder can transform logs at high-volume while minimizing Lambda runtime duration costs.
 ![Invocation Performance](./contrib/invocation_perf.png)
 _Performance of 12 hours of VPC flow log forwarding to ClickHouse Cloud. Average invocation latency stays under 150ms._
 
 ## Features
 
 - **OpenTelemetry Native**: Transforms all logs to OpenTelemetry format
+- **Multiple Log Sources**: Supports both CloudWatch Logs subscriptions and S3 event notifications
 - **Multiple Export Targets**: Supports OTLP HTTP/gRPC and other exporters via Rotel
 - **Python Log Processors**: Filter, transform, and enrich logs with Python before exporting
 - **Automatic parsing**: Support for JSON and key=value parsing, with automatic detection
 - **Log stream parser mapping**: Pre-built parser rules for known AWS CW log groups/streams
-- **AWS Resource Attributes**: Automatically enriches logs with AWS Lambda and CloudWatch log group tags
-- **Reliable delivery**: Ensures logs are delivered successfully before acknowledging request
+- **AWS Resource Attributes**: Automatically enriches logs with AWS Lambda metadata and resource tags
+- **Reliable delivery**: Ensures logs are delivered successfully
 
 ## Supported services
 
-The following services have been tested to work via CloudWatch Logs and include additional custom handling.
-Unlisted services that log via CloudWatch will likely work, but may be missing custom processing. This list will
-expand as we verify support for additional services.
+The following services have been tested to work via CloudWatch and/or S3 logs. They include custom log
+source detection and additional custom handling.
 
-| **Source**             | **Location** |
-| ---------------------- | ------------ |
-| CodeBuild Logs         | CloudWatch   |
-| CloudWatch Logs        | CloudWatch   |
-| CloudTrail Logs        | CloudWatch   |
-| EKS Control Plane Logs | CloudWatch   |
-| Lambda Logs            | CloudWatch   |
-| VPC Flow Logs          | CloudWatch   |
+Unlisted services that log via CloudWatch or S3 will likely work, but may be missing custom processing. This list will
+be expanded as we verify support for additional services.
+
+| **Source**             | **Location**   |
+| ---------------------- | -------------- |
+| CodeBuild Logs         | CloudWatch     |
+| CloudWatch Logs        | CloudWatch     |
+| CloudTrail Logs        | CloudWatch, S3 |
+| EKS Control Plane Logs | CloudWatch     |
+| Lambda Logs            | CloudWatch     |
+| VPC Flow Logs          | CloudWatch     |
 
 ## Deploying
 
@@ -49,16 +52,21 @@ There are two deployment methods available:
 
 ### Deploy with CloudFormation (Docker Container - Recommended)
 
-The CloudFormation templates automatically pull container images from Amazon ECR Public and copy them to your private ECR repository.
+The CloudFormation templates automatically pull container images from the Rotel Amazon ECR Public repository and copy them to a private ECR repository.
 
 **Note:** Python log processors are only supported when using the Docker container deployment method.
+
+The deployed Lambda function supports both CloudWatch Logs subscriptions and S3 event notifications.
+
+- [CloudWatch Logs Subcription](#setting-up-cloudWatch-logs-subscription): Configure a CloudWatch Logs subscription to send logs to the Lambda function
+- [S3 Event Notification](#s3-log-processing): Configure S3 notification to trigger the Lambda function
 
 #### Export to OTLP endpoint
 
 Launch this stack to export CloudWatch logs to any OTLP compatible endpoint.
 
-| **x86_64** | **arm64**|
-|------------|----------|
+| **x86_64**                                                                                                             | **arm64**                                                                                                             |
+| ---------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)][otlp-stack-x86-84] | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)][otlp-stack-arm64] |
 
 [otlp-stack-x86-84]: https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?stackName=rotel-lambda-forwarder-otlp&templateURL=https://rotel-cloudformation.s3.us-east-1.amazonaws.com/stacks/latest/x86_64/rotel-lambda-forwarder-otlp.yaml
@@ -68,8 +76,8 @@ Launch this stack to export CloudWatch logs to any OTLP compatible endpoint.
 
 Launch this stack to export CloudWatch logs to ClickHouse.
 
-| **x86_64** | **arm64**|
-|------------|----------|
+| **x86_64**                                                                                                           | **arm64**                                                                                                           |
+| -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)][ch-stack-x86-84] | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)][ch-stack-arm64] |
 
 [ch-stack-x86-84]: https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?stackName=rotel-lambda-forwarder-clickhouse&templateURL=https://rotel-cloudformation.s3.us-east-1.amazonaws.com/stacks/latest/x86_64/rotel-lambda-forwarder-clickhouse.yaml
@@ -91,6 +99,7 @@ If you're using a tag like `latest` and want to pull the newest version:
 6. Complete the stack update
 
 The CloudFormation stack will automatically:
+
 - Pull the latest image from Amazon ECR Public (`public.ecr.aws/streamfold/rotel-lambda-forwarder`)
 - Copy it to your private ECR repository
 - Redeploy the Lambda function with the updated image
@@ -155,6 +164,7 @@ docker push YOUR_ACCOUNT_ID.dkr.ecr.YOUR_REGION.amazonaws.com/rotel-lambda-forwa
 ```
 
 Replace:
+
 - `YOUR_REGION` with your AWS region (e.g., `us-west-2`)
 - `YOUR_ACCOUNT_ID` with your AWS account ID
 
@@ -223,6 +233,13 @@ aws iam create-policy \
       {
         "Effect": "Allow",
         "Action": [
+          "s3:GetObject"
+        ],
+        "Resource": "arn:aws:s3:::YOUR_LOG_BUCKET_NAME/*"
+      },
+      {
+        "Effect": "Allow",
+        "Action": [
           "ecr:GetAuthorizationToken",
           "ecr:BatchCheckLayerAvailability",
           "ecr:GetDownloadUrlForLayer",
@@ -237,6 +254,12 @@ aws iam attach-role-policy \
   --role-name rotel-lambda-forwarder-role \
   --policy-arn arn:aws:iam::YOUR_ACCOUNT_ID:policy/rotel-lambda-forwarder-policy
 ```
+
+**Important Notes**:
+
+- Replace `YOUR_BUCKET_NAME` with the S3 bucket used for caching flow log configurations
+- Replace `YOUR_LOG_BUCKET_NAME` with the S3 bucket(s) containing log files to process (if using S3 log processing)
+- The `s3:GetObject` permission on log buckets is only required if you're using S3 event notifications for log processing
 
 ##### Step 3: Create Lambda Function from Container Image
 
@@ -258,6 +281,7 @@ aws lambda create-function \
 ```
 
 **Important parameters:**
+
 - `--package-type Image`: Indicates this is a container-based Lambda
 - `--code ImageUri`: The full URI of your container image in ECR
 - `--architectures`: Must match the image architecture (`x86_64` or `arm64`)
@@ -342,6 +366,7 @@ aws iam attach-role-policy \
 **Additional Required Permissions**
 
 The Lambda function needs permissions to:
+
 1. List tags on CloudWatch Logs log groups
 2. Describe VPC flow logs
 3. Read and write to the S3 bucket for cache persistence
@@ -382,6 +407,13 @@ aws iam create-policy \
           "s3:ListBucket"
         ],
         "Resource": "arn:aws:s3:::YOUR_BUCKET_NAME"
+      },
+      {
+        "Effect": "Allow",
+        "Action": [
+          "s3:GetObject"
+        ],
+        "Resource": "arn:aws:s3:::YOUR_LOG_BUCKET_NAME/*"
       }
     ]
   }'
@@ -390,6 +422,14 @@ aws iam attach-role-policy \
   --role-name rotel-lambda-forwarder-role \
   --policy-arn arn:aws:iam::YOUR_ACCOUNT_ID:policy/rotel-lambda-forwarder-policy
 ```
+
+**Important Notes**:
+
+- Replace `YOUR_BUCKET_NAME` with the S3 bucket used for caching flow log configurations
+- Replace `YOUR_LOG_BUCKET_NAME` with the S3 bucket(s) containing log files to process (if using S3 log processing)
+- The `s3:GetObject` permission on log buckets is only required if you're using S3 event notifications for log processing
+
+##### Step 2: Create the Lambda Function (ZIP Deployment)
 
 Replace `YOUR_BUCKET_NAME` with your S3 bucket name and `YOUR_ACCOUNT_ID` with your AWS account ID.
 
@@ -417,6 +457,7 @@ aws lambda create-function \
 ```
 
 **Important parameters:**
+
 - `--runtime`: Use `provided.al2023` for Amazon Linux 2023 custom runtime
 - `--architectures`: Must match your build target (`x86_64` or `arm64`)
 - `--timeout`: Adjust based on your log volume (recommended: 30 seconds)
@@ -477,6 +518,7 @@ The cache file is stored at: `s3://<bucket>/rotel-lambda-forwarder/cache/log-gro
 ### Example
 
 If a log group has tags `env=production` and `team=platform`, the resource attributes will include:
+
 - `cloudwatch.log.tags.env` = `production`
 - `cloudwatch.log.tags.team` = `platform`
 
@@ -523,7 +565,7 @@ from. We plan to make this configurable in the future.
 
 ### EKS
 
-* Strips `responseElements.credentials.sessionToken`
+- Strips `responseElements.credentials.sessionToken`
 
 ## VPC Flow Logs
 
@@ -550,6 +592,60 @@ These permissions are included in the CloudFormation templates by default.
 
 **Note:** Flow logs should be sent to unique CloudWatch Log Groups. If multiple flow logs are exported to the
 same log group then the Lambda Forwarder will be unable to parse the fields correctly.
+
+## S3 Log Processing
+
+The forwarder supports processing log files stored in S3 via S3 event notifications. When a log file is uploaded to S3, the Lambda function automatically downloads, parses, and forwards the logs to your configured OTLP endpoint.
+
+### Features
+
+- **Automatic Format Detection**: Intelligently detects JSON, key-value, and plain text log formats
+- **Parallel Processing**: Processes multiple S3 objects concurrently with configurable limits
+- **Efficient Batching**: Configurable batch size for efficient processing
+- **Rich Metadata**: Attaches S3 bucket, key, and AWS resource attributes to all logs
+
+### Supported Log Formats
+
+#### JSON Records
+
+Supports the AWS logs JSON records format where each file is JSON blob of multiple log records
+under the top-level key `Records`. Each log record is individually converted to an OTLP log record.
+
+```json
+{
+  "Records": [
+    {
+      "eventName": "CreateBucket",
+      "eventTime": "2024-01-01T12:00:00Z",
+      "level": "info"
+    },
+    {
+      "eventName": "DeleteBucket",
+      "eventTime": "2024-01-01T13:00:00Z",
+      "level": "warn"
+    }
+  ]
+}
+```
+
+#### Plain Text Logs
+
+Lines that don't match JSON format are treated as plain text and stored as-is in the log body.
+
+### Configuration
+
+Configure the S3 log processor using these environment variables:
+
+| Variable                            | Description                                          | Default |
+| ----------------------------------- | ---------------------------------------------------- | ------- |
+| `FORWARDER_S3_MAX_PARALLEL_OBJECTS` | Maximum number of S3 objects to process concurrently | `5`     |
+| `FORWARDER_S3_BATCH_SIZE`           | Number of log records to batch per ResourceLog       | `1000`  |
+
+### Setup
+
+1. **Configure S3 Event Notifications**: Set up your S3 bucket to send event notifications to the Lambda function when new log files are created
+2. **Grant S3 Permissions**: Add `s3:GetObject` permission to the Lambda IAM role
+3. **Grant Lambda Invocation Permission**: Allow S3 to invoke your Lambda function
 
 ## Configuration
 
@@ -578,6 +674,15 @@ be set to the function's maximum timeout.
 ROTEL_EXPORTER_RETRY_MAX_ELAPSED_TIME=30s
 ```
 
+### S3 Log Processing Configuration
+
+When using S3 event notifications to process log files, you can configure processing behavior with these environment variables:
+
+- `FORWARDER_S3_MAX_PARALLEL_OBJECTS`: Maximum concurrent S3 objects to process (default: 5)
+- `FORWARDER_S3_BATCH_SIZE`: Number of log records per batch (default: 1000)
+
+See the [S3 Log Processing](#s3-log-processing) section for complete setup instructions.
+
 ### OTLP Log Processors from S3
 
 You can configure OTLP log processors to transform or filter logs before they are exported. The Lambda Forwarder supports loading processor configurations from any HTTP endpoint or S3 bucket.
@@ -595,6 +700,7 @@ FORWARDER_OTLP_LOG_PROCESSORS="https://gist.githubusercontent.com/mheffner/4d4aa
 to read from the bucket.
 
 **Features**:
+
 - Multiple URIs can be specified as a comma-separated list (supports: http, https, or s3)
 - Processors are downloaded to `/tmp/log_processors/`
 - Processors are executed in the order specified in `FORWARDER_OTLP_LOG_PROCESSORS`

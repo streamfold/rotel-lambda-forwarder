@@ -116,7 +116,7 @@ mod tests {
             ParserType::VpcLog,
             Some(Arc::new(ParsedFields::Success(dflt_fields))),
         );
-        parser.parse(123456789, log_entry)
+        parser.parse(123456789, log_entry.into())
     }
 
     fn parse_vpclog_to_map_default(

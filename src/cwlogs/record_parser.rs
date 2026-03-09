@@ -67,16 +67,11 @@ impl RecordParser {
     ///
     /// On parse failure the raw message is preserved as the log body.
     pub(crate) fn parse(&self, now_nanos: u64, log_entry: LogEntry) -> LogRecord {
-        // Seed the record with the CW timestamp and, when non-empty, the entry ID.
-        let initial_attributes = if !log_entry.id.is_empty() {
-            vec![string_kv("cloudwatch.id", log_entry.id)]
-        } else {
-            vec![]
-        };
-
-        let mut record_builder =
-            self.builder
-                .start(now_nanos, log_entry.timestamp, initial_attributes);
+        let mut record_builder = self.builder.start(
+            now_nanos,
+            log_entry.timestamp,
+            vec![string_kv("cloudwatch.id", log_entry.id)],
+        );
 
         match self.parse_message(log_entry.message) {
             ParsedMessage::Map(map) => {

@@ -1,10 +1,7 @@
 use std::sync::Arc;
 
 use aws_lambda_events::cloudwatch_logs::LogEntry;
-use opentelemetry_proto::tonic::{
-    common::v1::{AnyValue, KeyValue, any_value::Value},
-    logs::v1::LogRecord,
-};
+use opentelemetry_proto::tonic::logs::v1::LogRecord;
 use tracing::warn;
 
 use crate::flowlogs::ParsedFields;
@@ -13,6 +10,7 @@ use crate::parse::{
     keyvalue::parse_keyvalue_to_map,
     platform::{LogPlatform, ParserType},
     record_parser::{LogBuilder, RecordParserError},
+    utils::string_kv,
     vpclog::parse_vpclog_to_map,
 };
 
@@ -70,12 +68,7 @@ impl RecordParser {
     pub(crate) fn parse(&self, now_nanos: u64, log_entry: LogEntry) -> LogRecord {
         // Seed the record with the CW timestamp and, when non-empty, the entry ID.
         let initial_attributes = if !log_entry.id.is_empty() {
-            vec![KeyValue {
-                key: "cloudwatch.id".to_string(),
-                value: Some(AnyValue {
-                    value: Some(Value::StringValue(log_entry.id)),
-                }),
-            }]
+            vec![string_kv("cloudwatch.id", log_entry.id)]
         } else {
             vec![]
         };

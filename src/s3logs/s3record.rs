@@ -8,7 +8,7 @@ use aws_sdk_s3::Client as S3Client;
 use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
 use opentelemetry_proto::tonic::{
-    common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value::Value},
+    common::v1::{InstrumentationScope, KeyValue},
     logs::v1::{ResourceLogs, ScopeLogs},
     resource::v1::Resource,
 };
@@ -18,6 +18,7 @@ use crate::aws_attributes::AwsAttributes;
 use crate::parse::json::parse_json_to_map;
 use crate::parse::platform::{LogPlatform, ParserType};
 use crate::parse::record_parser::LogBuilder;
+use crate::parse::utils::string_kv;
 
 use super::{JsonLogRecords, ParserError};
 
@@ -416,46 +417,16 @@ fn create_base_attributes(
     log_platform: LogPlatform,
 ) -> Vec<KeyValue> {
     let mut attributes = vec![
-        KeyValue {
-            key: "cloud.provider".to_string(),
-            value: Some(AnyValue {
-                value: Some(Value::StringValue("aws".to_string())),
-            }),
-        },
-        KeyValue {
-            key: "cloud.region".to_string(),
-            value: Some(AnyValue {
-                value: Some(Value::StringValue(aws_attributes.region.clone())),
-            }),
-        },
-        KeyValue {
-            key: "cloud.account.id".to_string(),
-            value: Some(AnyValue {
-                value: Some(Value::StringValue(aws_attributes.account_id.clone())),
-            }),
-        },
-        KeyValue {
-            key: "aws.s3.bucket".to_string(),
-            value: Some(AnyValue {
-                value: Some(Value::StringValue(bucket.to_string())),
-            }),
-        },
-        KeyValue {
-            key: "aws.s3.key".to_string(),
-            value: Some(AnyValue {
-                value: Some(Value::StringValue(key.to_string())),
-            }),
-        },
+        string_kv("cloud.provider", "aws"),
+        string_kv("cloud.region", aws_attributes.region.clone()),
+        string_kv("cloud.account.id", aws_attributes.account_id.clone()),
+        string_kv("aws.s3.bucket", bucket),
+        string_kv("aws.s3.key", key),
     ];
 
     // Add cloud.platform attribute based on detected platform
     if log_platform != LogPlatform::Unknown {
-        attributes.push(KeyValue {
-            key: "cloud.platform".to_string(),
-            value: Some(AnyValue {
-                value: Some(Value::StringValue(log_platform.as_str().to_string())),
-            }),
-        });
+        attributes.push(string_kv("cloud.platform", log_platform.as_str()));
     }
 
     attributes
@@ -477,14 +448,10 @@ fn create_resource_logs(
             scope: Some(InstrumentationScope {
                 name: "rotel-lambda-forwarder".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
-                attributes: vec![KeyValue {
-                    key: "aws.lambda.invoked_arn".to_string(),
-                    value: Some(AnyValue {
-                        value: Some(Value::StringValue(
-                            aws_attributes.invoked_function_arn.clone(),
-                        )),
-                    }),
-                }],
+                attributes: vec![string_kv(
+                    "aws.lambda.invoked_arn",
+                    aws_attributes.invoked_function_arn.clone(),
+                )],
                 dropped_attributes_count: 0,
             }),
             log_records,

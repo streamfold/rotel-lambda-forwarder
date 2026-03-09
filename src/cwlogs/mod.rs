@@ -4,13 +4,14 @@ use std::{collections::HashMap, sync::Arc};
 
 use aws_lambda_events::cloudwatch_logs::LogsEvent;
 use opentelemetry_proto::tonic::{
-    common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value::Value},
+    common::v1::InstrumentationScope,
     logs::v1::{ResourceLogs, ScopeLogs},
     resource::v1::Resource,
 };
 use tracing::debug;
 
 use crate::parse::platform::{LogPlatform, ParserError, ParserType};
+use crate::parse::utils::string_kv;
 use crate::{
     aws_attributes::AwsAttributes,
     flowlogs::{FlowLogManager, ParsedFields},
@@ -87,66 +88,32 @@ impl<'a> Parser<'a> {
 
         // Build base attributes
         let mut attributes = vec![
-            KeyValue {
-                key: "cloud.provider".to_string(),
-                value: Some(AnyValue {
-                    value: Some(Value::StringValue("aws".to_string())),
-                }),
-            },
-            KeyValue {
-                key: "cloud.region".to_string(),
-                value: Some(AnyValue {
-                    value: Some(Value::StringValue(self.aws_attributes.region.clone())),
-                }),
-            },
-            KeyValue {
-                key: "cloud.account.id".to_string(),
-                value: Some(AnyValue {
-                    value: Some(Value::StringValue(self.aws_attributes.account_id.clone())),
-                }),
-            },
-            KeyValue {
-                key: "cloudwatch.log.group.name".to_string(),
-                value: Some(AnyValue {
-                    value: Some(Value::StringValue(log_data.log_group)),
-                }),
-            },
-            KeyValue {
-                key: "cloudwatch.log.stream.name".to_string(),
-                value: Some(AnyValue {
-                    value: Some(Value::StringValue(log_data.log_stream)),
-                }),
-            },
+            string_kv("cloud.provider", "aws"),
+            string_kv("cloud.region", self.aws_attributes.region.clone()),
+            string_kv("cloud.account.id", self.aws_attributes.account_id.clone()),
+            string_kv("cloudwatch.log.group.name", log_data.log_group),
+            string_kv("cloudwatch.log.stream.name", log_data.log_stream),
         ];
 
         // Add cloud.platform attribute based on detected platform
         if log_platform != LogPlatform::Unknown {
-            attributes.push(KeyValue {
-                key: "cloud.platform".to_string(),
-                value: Some(AnyValue {
-                    value: Some(Value::StringValue(log_platform.as_str().to_string())),
-                }),
-            });
+            attributes.push(string_kv("cloud.platform", log_platform.as_str()));
         }
 
         // Add CloudWatch log group tags as resource attributes
         for (tag_key, tag_value) in log_group_tags {
-            attributes.push(KeyValue {
-                key: format!("cloudwatch.log.tags.{}", tag_key),
-                value: Some(AnyValue {
-                    value: Some(Value::StringValue(tag_value)),
-                }),
-            });
+            attributes.push(string_kv(
+                &format!("cloudwatch.log.tags.{}", tag_key),
+                tag_value,
+            ));
         }
 
         // Add EC2 Flow Log tags as resource attributes
         for (tag_key, tag_value) in flow_log_tags {
-            attributes.push(KeyValue {
-                key: format!("ec2.flow-logs.tags.{}", tag_key),
-                value: Some(AnyValue {
-                    value: Some(Value::StringValue(tag_value)),
-                }),
-            });
+            attributes.push(string_kv(
+                &format!("ec2.flow-logs.tags.{}", tag_key),
+                tag_value,
+            ));
         }
 
         let rec_parser = RecordParser::new(log_platform, parser_type, flow_log_parsed_fields);
@@ -166,14 +133,10 @@ impl<'a> Parser<'a> {
                 scope: Some(InstrumentationScope {
                     name: env!("CARGO_PKG_NAME").to_string(),
                     version: env!("CARGO_PKG_VERSION").to_string(),
-                    attributes: vec![KeyValue {
-                        key: "aws.lambda.invoked_arn".to_string(),
-                        value: Some(AnyValue {
-                            value: Some(Value::StringValue(
-                                self.aws_attributes.invoked_function_arn.clone(),
-                            )),
-                        }),
-                    }],
+                    attributes: vec![string_kv(
+                        "aws.lambda.invoked_arn",
+                        self.aws_attributes.invoked_function_arn.clone(),
+                    )],
                     dropped_attributes_count: 0,
                 }),
                 log_records,
@@ -271,6 +234,7 @@ mod tests {
     use super::*;
     use aws_config::BehaviorVersion;
     use aws_lambda_events::cloudwatch_logs::LogEntry;
+    use opentelemetry_proto::tonic::common::v1::any_value::Value;
 
     #[tokio::test]
     async fn test_parse_empty_event() {

@@ -10,7 +10,7 @@ use opentelemetry_proto::tonic::{
 };
 use tracing::debug;
 
-use crate::parse::platform::{LogPlatform, ParserError, ParserType};
+use crate::parse::platform::{LogPlatform, ParserError};
 use crate::parse::utils::string_kv;
 use crate::{
     aws_attributes::AwsAttributes,
@@ -140,7 +140,7 @@ impl<'a> Parser<'a> {
                     dropped_attributes_count: 0,
                 }),
                 log_records,
-                schema_url: "".to_string(),
+                schema_url: String::new(),
             }],
             schema_url: String::new(),
         };
@@ -149,6 +149,16 @@ impl<'a> Parser<'a> {
 
         Ok(resource_logs_list)
     }
+}
+
+/// Represents the type of parser to use for log entries
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParserType {
+    Json,
+    KeyValue,
+    VpcLog,
+    #[default]
+    Unknown,
 }
 
 static CLOUDTRAIL_REGEX: LazyLock<Regex> =

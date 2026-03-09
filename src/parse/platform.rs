@@ -27,16 +27,6 @@ impl LogPlatform {
     }
 }
 
-/// Represents the type of parser to use for log entries
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParserType {
-    Json,
-    KeyValue,
-    VpcLog,
-    #[default]
-    Unknown,
-}
-
 /// Errors that can occur during parsing
 #[derive(Debug, thiserror::Error)]
 pub enum ParserError {

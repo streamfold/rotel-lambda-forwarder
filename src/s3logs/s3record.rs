@@ -15,8 +15,9 @@ use opentelemetry_proto::tonic::{
 use tracing::debug;
 
 use crate::aws_attributes::AwsAttributes;
+use crate::cwlogs::ParserType;
 use crate::parse::json::parse_json_to_map;
-use crate::parse::platform::{LogPlatform, ParserType};
+use crate::parse::platform::LogPlatform;
 use crate::parse::record_parser::LogBuilder;
 use crate::parse::utils::string_kv;
 
@@ -446,7 +447,7 @@ fn create_resource_logs(
         }),
         scope_logs: vec![ScopeLogs {
             scope: Some(InstrumentationScope {
-                name: "rotel-lambda-forwarder".to_string(),
+                name: env!("CARGO_PKG_NAME").to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 attributes: vec![string_kv(
                     "aws.lambda.invoked_arn",
@@ -455,7 +456,7 @@ fn create_resource_logs(
                 dropped_attributes_count: 0,
             }),
             log_records,
-            schema_url: "".to_string(),
+            schema_url: String::new(),
         }],
         schema_url: String::new(),
     }

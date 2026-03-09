@@ -146,8 +146,9 @@ fn parse_keyvalue_pairs(input: &str) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cwlogs::ParserType;
     use crate::cwlogs::record_parser::RecordParser;
-    use crate::parse::platform::{LogPlatform, ParserType};
+    use crate::parse::platform::LogPlatform;
     use aws_lambda_events::cloudwatch_logs::LogEntry;
     use opentelemetry_proto::tonic::{
         common::v1::any_value::Value,

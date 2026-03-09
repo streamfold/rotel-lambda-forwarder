@@ -14,7 +14,7 @@ use std::sync::Arc;
 use serde_json::Value as JsonValue;
 
 use crate::flowlogs::{ParsedFieldType, ParsedFields};
-use crate::parse::{cwlogs::ParserError, record_parser::RecordParserError};
+use crate::parse::{platform::ParserError, record_parser::RecordParserError};
 
 /// Parse an EC2 Flow Log record from a string using pre-parsed field names
 /// Fields with value "-" are excluded from the result
@@ -90,9 +90,10 @@ fn parse_vpclog_fields(input: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cwlogs::ParserType;
+    use crate::cwlogs::record_parser::RecordParser;
     use crate::flowlogs::parse_log_format;
-    use crate::parse::cwlogs::{LogPlatform, ParserType};
-    use crate::parse::record_parser::RecordParser;
+    use crate::parse::platform::LogPlatform;
     use aws_lambda_events::cloudwatch_logs::LogEntry;
     use opentelemetry_proto::tonic::{common::v1::any_value::Value, logs::v1::LogRecord};
 

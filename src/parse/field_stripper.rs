@@ -8,7 +8,7 @@
 use serde_json::Value as JsonValue;
 use tracing::debug;
 
-use crate::parse::cwlogs::LogPlatform;
+use crate::parse::platform::LogPlatform;
 
 /// Strips sensitive fields from parsed log data based on the log platform.
 pub struct FieldStripper {

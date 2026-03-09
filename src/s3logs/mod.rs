@@ -171,6 +171,12 @@ impl Parser {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParserType {
+    Json,
+    Unknown,
+}
+
 /// Errors that can occur during S3 log parsing
 #[derive(Debug, thiserror::Error)]
 pub enum ParserError {

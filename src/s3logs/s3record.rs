@@ -1,19 +1,24 @@
 use std::io::Read;
 
+use serde_json::Value as JsonValue;
+use tracing::warn;
+
 use aws_lambda_events::s3::S3EventRecord;
 use aws_sdk_s3::Client as S3Client;
 use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
 use opentelemetry_proto::tonic::{
-    common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value::Value},
+    common::v1::{InstrumentationScope, KeyValue},
     logs::v1::{ResourceLogs, ScopeLogs},
     resource::v1::Resource,
 };
 use tracing::debug;
 
-use crate::aws_attributes::AwsAttributes;
-use crate::parse::cwlogs::{LogPlatform, ParserType};
-use crate::parse::record_parser::{RecordLogEntry, RecordParser};
+use crate::parse::json::parse_json_to_map;
+use crate::parse::platform::LogPlatform;
+use crate::parse::record_parser::LogBuilder;
+use crate::parse::utils::string_kv;
+use crate::{aws_attributes::AwsAttributes, s3logs::ParserType};
 
 use super::{JsonLogRecords, ParserError};
 
@@ -241,8 +246,7 @@ fn parse_log_lines(
     // Create base resource attributes
     let base_attributes = create_base_attributes(bucket, key, aws_attributes, log_platform);
 
-    // Parse lines into log records using RecordParser
-    let rec_parser = RecordParser::new(log_platform, parser_type, None);
+    let builder = LogBuilder::new(log_platform);
 
     let event_timestamp = event_time.timestamp_millis() as i64;
 
@@ -252,9 +256,13 @@ fn parse_log_lines(
 
     let lines_count = lines.len();
     for line in lines.into_iter() {
-        let log_entry = RecordLogEntry::new(None, event_timestamp, String::from(line));
-
-        let log_record = rec_parser.parse(now_nanos, log_entry);
+        let log_record = parse_line(
+            &builder,
+            now_nanos,
+            event_timestamp,
+            String::from(line),
+            parser_type,
+        );
         current_batch.push(log_record);
 
         // Create a ResourceLogs when we hit the batch size
@@ -285,6 +293,51 @@ fn parse_log_lines(
     Ok(resource_logs_list)
 }
 
+/// Parse a single log line string into a [`LogRecord`].
+///
+/// Dispatches based on `parser_type`:
+/// * `Json` — parse as a JSON object; on failure the raw string becomes the body.
+/// * `Unknown` — auto-detect: attempt JSON for `{`-prefixed lines, otherwise plain text.
+/// * Any other type — treat as plain text (S3 log detection never produces `VpcLog` or
+///   `KeyValue`).
+fn parse_line(
+    builder: &LogBuilder,
+    now_nanos: u64,
+    timestamp_ms: i64,
+    line: String,
+    parser_type: ParserType,
+) -> opentelemetry_proto::tonic::logs::v1::LogRecord {
+    let mut record_builder = builder.start(now_nanos, timestamp_ms, vec![]);
+
+    let map_result: Result<Option<serde_json::Map<String, JsonValue>>, _> = match parser_type {
+        ParserType::Json => parse_json_to_map(line.clone())
+            .map(Some)
+            .map_err(|e| (e, line.clone())),
+        ParserType::Unknown => {
+            if line.len() > 2 && line.starts_with('{') {
+                parse_json_to_map(line.clone())
+                    .map(Some)
+                    .map_err(|e| (e, line.clone()))
+            } else {
+                return record_builder.set_body_text(line).finish();
+            }
+        }
+    };
+
+    match map_result {
+        Ok(None) => {}
+        Ok(Some(map)) => {
+            record_builder.populate_from_map(map);
+        }
+        Err((err, raw)) => {
+            warn!(error = ?err, "Failed to parse log line, using raw text as body");
+            return record_builder.set_body_text(raw).finish();
+        }
+    }
+
+    record_builder.finish()
+}
+
 /// Parse a JSON blob containing a Records array
 fn parse_json_blob(
     json_blob: JsonLogRecords,
@@ -312,8 +365,7 @@ fn parse_json_blob(
         "Detected log platform for JSON blob"
     );
 
-    // Create RecordParser with Json parser type and detected platform
-    let rec_parser = RecordParser::new(log_platform, ParserType::Json, None);
+    let builder = LogBuilder::new(log_platform);
 
     let event_timestamp = event_time.timestamp_millis() as i64;
 
@@ -323,8 +375,7 @@ fn parse_json_blob(
 
     let records_count = json_blob.len();
     for record_map in json_blob.records {
-        // Parse each record map directly using the new parse_from_map method
-        let log_record = rec_parser.parse_from_map(now_nanos, event_timestamp, record_map);
+        let log_record = builder.parse_from_map(now_nanos, event_timestamp, record_map);
         current_batch.push(log_record);
 
         // Create a ResourceLogs when we hit the batch size
@@ -362,46 +413,16 @@ fn create_base_attributes(
     log_platform: LogPlatform,
 ) -> Vec<KeyValue> {
     let mut attributes = vec![
-        KeyValue {
-            key: "cloud.provider".to_string(),
-            value: Some(AnyValue {
-                value: Some(Value::StringValue("aws".to_string())),
-            }),
-        },
-        KeyValue {
-            key: "cloud.region".to_string(),
-            value: Some(AnyValue {
-                value: Some(Value::StringValue(aws_attributes.region.clone())),
-            }),
-        },
-        KeyValue {
-            key: "cloud.account.id".to_string(),
-            value: Some(AnyValue {
-                value: Some(Value::StringValue(aws_attributes.account_id.clone())),
-            }),
-        },
-        KeyValue {
-            key: "aws.s3.bucket".to_string(),
-            value: Some(AnyValue {
-                value: Some(Value::StringValue(bucket.to_string())),
-            }),
-        },
-        KeyValue {
-            key: "aws.s3.key".to_string(),
-            value: Some(AnyValue {
-                value: Some(Value::StringValue(key.to_string())),
-            }),
-        },
+        string_kv("cloud.provider", "aws"),
+        string_kv("cloud.region", aws_attributes.region.clone()),
+        string_kv("cloud.account.id", aws_attributes.account_id.clone()),
+        string_kv("aws.s3.bucket", bucket),
+        string_kv("aws.s3.key", key),
     ];
 
     // Add cloud.platform attribute based on detected platform
     if log_platform != LogPlatform::Unknown {
-        attributes.push(KeyValue {
-            key: "cloud.platform".to_string(),
-            value: Some(AnyValue {
-                value: Some(Value::StringValue(log_platform.as_str().to_string())),
-            }),
-        });
+        attributes.push(string_kv("cloud.platform", log_platform.as_str()));
     }
 
     attributes
@@ -421,20 +442,16 @@ fn create_resource_logs(
         }),
         scope_logs: vec![ScopeLogs {
             scope: Some(InstrumentationScope {
-                name: "rotel-lambda-forwarder".to_string(),
+                name: env!("CARGO_PKG_NAME").to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
-                attributes: vec![KeyValue {
-                    key: "aws.lambda.invoked_arn".to_string(),
-                    value: Some(AnyValue {
-                        value: Some(Value::StringValue(
-                            aws_attributes.invoked_function_arn.clone(),
-                        )),
-                    }),
-                }],
+                attributes: vec![string_kv(
+                    "aws.lambda.invoked_arn",
+                    aws_attributes.invoked_function_arn.clone(),
+                )],
                 dropped_attributes_count: 0,
             }),
             log_records,
-            schema_url: "".to_string(),
+            schema_url: String::new(),
         }],
         schema_url: String::new(),
     }
@@ -497,6 +514,7 @@ fn detect_log_platform_from_key(key: &str) -> LogPlatform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opentelemetry_proto::tonic::logs::v1::SeverityNumber;
 
     #[test]
     fn test_detect_log_format_json_from_suffix() {
@@ -662,6 +680,70 @@ mod tests {
             detect_log_platform_from_key("other/logs/test.json"),
             LogPlatform::Unknown
         );
+    }
+
+    #[test]
+    fn test_parse_line_json() {
+        let builder = LogBuilder::new(LogPlatform::Unknown);
+        let lr = parse_line(
+            &builder,
+            123_456_789,
+            1000,
+            r#"{"level":"info","msg":"hello"}"#.to_string(),
+            ParserType::Json,
+        );
+        assert_eq!(lr.severity_number, SeverityNumber::Info as i32);
+        assert!(lr.body.is_some());
+    }
+
+    #[test]
+    fn test_parse_line_unknown_auto_detects_json() {
+        let builder = LogBuilder::new(LogPlatform::Unknown);
+        let lr = parse_line(
+            &builder,
+            123_456_789,
+            1000,
+            r#"{"level":"debug","msg":"auto"}"#.to_string(),
+            ParserType::Unknown,
+        );
+        assert_eq!(lr.severity_number, SeverityNumber::Debug as i32);
+        assert!(lr.body.is_some());
+    }
+
+    #[test]
+    fn test_parse_line_plain_text_fallback() {
+        let builder = LogBuilder::new(LogPlatform::Unknown);
+        let msg = "just plain text";
+        let lr = parse_line(&builder, 0, 0, msg.to_string(), ParserType::Unknown);
+        if let Some(body) = &lr.body {
+            if let Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) =
+                &body.value
+            {
+                assert_eq!(s, msg);
+            } else {
+                panic!("expected string body");
+            }
+        } else {
+            panic!("body should be set");
+        }
+    }
+
+    #[test]
+    fn test_parse_line_invalid_json_falls_back_to_plain_text() {
+        let builder = LogBuilder::new(LogPlatform::Unknown);
+        let bad = r#"{ not valid json }"#;
+        let lr = parse_line(&builder, 0, 0, bad.to_string(), ParserType::Json);
+        if let Some(body) = &lr.body {
+            if let Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) =
+                &body.value
+            {
+                assert_eq!(s, bad);
+            } else {
+                panic!("expected string body on parse failure");
+            }
+        } else {
+            panic!("body should be set on parse failure");
+        }
     }
 
     #[tokio::test]

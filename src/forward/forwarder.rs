@@ -9,10 +9,10 @@ use rotel::topology::payload::{Message, MessageMetadata};
 use tracing::{debug, error};
 
 use crate::aws_attributes::AwsAttributes;
+use crate::cwlogs;
 use crate::events::{LambdaEvent, LambdaPayload};
 use crate::flowlogs::FlowLogManager;
 use crate::forward::{AckerBuilder, AckerWaiter};
-use crate::parse::cwlogs;
 use crate::s3logs;
 use crate::tags::TagManager;
 

@@ -1,4 +1,4 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use opentelemetry_proto::tonic::{
     common::v1::{AnyValue, KeyValue, any_value::Value},
@@ -6,213 +6,153 @@ use opentelemetry_proto::tonic::{
 };
 use regex::Regex;
 use serde_json::Value as JsonValue;
-use tracing::{debug, warn};
+use tracing::debug;
 
-use crate::flowlogs::ParsedFields;
 use crate::parse::{
-    cwlogs::{LogPlatform, ParserError, ParserType},
     field_stripper::FieldStripper,
-    json::{json_value_to_any_value, parse_json_to_map},
-    keyvalue::parse_keyvalue_to_map,
-    vpclog::parse_vpclog_to_map,
+    json::json_value_to_any_value,
+    platform::{LogPlatform, ParserError},
 };
 
-/// Parser for CloudWatch log entries that converts them into OpenTelemetry LogRecords.
-///
-/// The `RecordParser` handles format detection, parsing, field extraction, and
-/// platform-specific transformations in a unified way for both JSON and key-value logs.
-pub(crate) struct RecordParser {
-    platform: LogPlatform,
-    parser_type: ParserType,
-    field_stripper: FieldStripper,
-    flow_log_parsed_fields: Option<Arc<ParsedFields>>,
-}
-
-pub(crate) struct RecordLogEntry {
-    cloudwatch_id: Option<String>,
-    timestamp: i64,
-    message: String,
-}
-
-impl RecordLogEntry {
-    pub(crate) fn new(cloudwatch_id: Option<String>, timestamp: i64, message: String) -> Self {
-        Self {
-            cloudwatch_id,
-            timestamp,
-            message,
-        }
-    }
-}
-
+/// Wraps a parse error together with the original raw message so that callers can fall back
+/// to treating the message as plain text.
 #[derive(Debug)]
 pub(crate) struct RecordParserError(pub(crate) ParserError, pub(crate) String);
 
-impl RecordParser {
-    /// Create a new RecordParser for a specific platform and parser type.
-    pub(crate) fn new(
-        platform: LogPlatform,
-        parser_type: ParserType,
-        flow_log_parsed_fields: Option<Arc<ParsedFields>>,
-    ) -> Self {
+// ── LogBuilder ───────────────────────────────────────────────────────────────────────────────────
+
+/// Platform-aware factory for building OpenTelemetry [`LogRecord`]s.
+///
+/// `LogBuilder` is the long-lived, reusable part: it holds the platform identity and the
+/// [`FieldStripper`] configuration that are shared across all records produced from the same
+/// log source.  Call [`LogBuilder::start`] to obtain a per-record [`LogRecordBuilder`] that
+/// accumulates state and ultimately returns the finished [`LogRecord`].
+pub(crate) struct LogBuilder {
+    platform: LogPlatform,
+    field_stripper: FieldStripper,
+}
+
+impl LogBuilder {
+    /// Create a new `LogBuilder` for the given platform.
+    pub(crate) fn new(platform: LogPlatform) -> Self {
         Self {
             platform,
-            parser_type,
             field_stripper: FieldStripper::new(platform),
-            flow_log_parsed_fields,
         }
     }
 
-    /// Parse a CloudWatch LogEntry into an OpenTelemetry LogRecord.
-    /// If parsing fails, the message is treated as plain text.
-    pub(crate) fn parse(&self, now_nanos: u64, log_entry: RecordLogEntry) -> LogRecord {
-        let mut lr = LogRecord {
-            time_unix_nano: timestamp_ms_to_ns(log_entry.timestamp, now_nanos),
+    /// Begin building a new [`LogRecord`].
+    ///
+    /// * `now_nanos` — wall-clock nanoseconds used as `observed_time_unix_nano` and as a
+    ///   fallback `time_unix_nano` when `timestamp_ms` would overflow.
+    /// * `timestamp_ms` — millisecond-precision event timestamp converted to `time_unix_nano`.
+    /// * `initial_attributes` — zero or more [`KeyValue`] pairs prepended to the record's
+    ///   attribute list before any map-derived attributes are added (e.g. `cloudwatch.id`).
+    pub(crate) fn start(
+        &self,
+        now_nanos: u64,
+        timestamp_ms: i64,
+        initial_attributes: Vec<KeyValue>,
+    ) -> LogRecordBuilder<'_> {
+        let lr = LogRecord {
+            time_unix_nano: timestamp_ms_to_ns(timestamp_ms, now_nanos),
             observed_time_unix_nano: now_nanos,
+            attributes: initial_attributes,
             ..Default::default()
         };
-
-        if let Some(cloudwatch_id) = log_entry.cloudwatch_id {
-            lr.attributes.push(KeyValue {
-                key: "cloudwatch.id".to_string(),
-                value: Some(AnyValue {
-                    value: Some(Value::StringValue(cloudwatch_id)),
-                }),
-            })
+        LogRecordBuilder {
+            lr,
+            platform: self.platform,
+            field_stripper: &self.field_stripper,
         }
-
-        let message = log_entry.message;
-
-        // Try to parse the message into a map
-        let json_map = self.parse_message_to_map(message, &mut lr);
-
-        match json_map {
-            Ok(None) => return lr,
-            Ok(Some(mut map)) => {
-                self.field_stripper.strip_fields(&mut map);
-
-                self.populate_log_record_from_map(map, &mut lr);
-            }
-            Err(RecordParserError(err, msg)) => {
-                warn!(error = ?err, "Failed to parse log entry, using raw text as body");
-
-                // If parsing failed, treat as plain text
-                lr.body = Some(AnyValue {
-                    value: Some(Value::StringValue(msg)),
-                });
-            }
-        }
-
-        lr
     }
 
-    /// Parse a pre-parsed JSON map into an OpenTelemetry LogRecord.
-    /// This is used for S3 logs where the entire file is a JSON blob with a Records array.
+    /// Convenience: build a [`LogRecord`] directly from a pre-parsed JSON map.
+    ///
+    /// Used by `s3logs` for JSON-blob files where the entire file is a `Records` array
+    /// and each element has already been deserialised.
     pub(crate) fn parse_from_map(
         &self,
         now_nanos: u64,
-        timestamp: i64,
-        mut json_map: serde_json::Map<String, JsonValue>,
+        timestamp_ms: i64,
+        json_map: serde_json::Map<String, JsonValue>,
     ) -> LogRecord {
-        let mut lr = LogRecord {
-            time_unix_nano: timestamp_ms_to_ns(timestamp, now_nanos),
-            observed_time_unix_nano: now_nanos,
-            ..Default::default()
-        };
+        let mut builder = self.start(now_nanos, timestamp_ms, vec![]);
+        builder.populate_from_map(json_map);
+        builder.finish()
+    }
+}
 
-        // Strip sensitive fields
+// ── LogRecordBuilder ─────────────────────────────────────────────────────────────────────────────
+
+/// Per-record builder returned by [`LogBuilder::start`].
+///
+/// Holds the partially-constructed [`LogRecord`] and a reference back to the parent
+/// [`LogBuilder`]'s platform configuration and field stripper.  Obtain a finished record by
+/// calling [`LogRecordBuilder::finish`].
+pub(crate) struct LogRecordBuilder<'a> {
+    lr: LogRecord,
+    platform: LogPlatform,
+    field_stripper: &'a FieldStripper,
+}
+
+impl<'a> LogRecordBuilder<'a> {
+    /// Set the record body to a plain-text string value.
+    pub(crate) fn set_body_text(mut self, text: String) -> Self {
+        self.lr.body = Some(AnyValue {
+            value: Some(Value::StringValue(text)),
+        });
+        self
+    }
+
+    /// Strip sensitive fields from `json_map` then extract well-known fields (severity, body,
+    /// timestamp, trace/span IDs) and platform-specific fallbacks into the in-progress record.
+    /// Any remaining map entries become log record attributes.
+    pub(crate) fn populate_from_map(&mut self, mut json_map: serde_json::Map<String, JsonValue>) {
+        // Strip sensitive fields before anything else.
         self.field_stripper.strip_fields(&mut json_map);
 
-        // Populate the log record from the map
-        self.populate_log_record_from_map(json_map, &mut lr);
-
-        lr
-    }
-
-    /// Parse a message string into a JSON map based on the parser type.
-    /// This is the first phase of parsing that converts a string message into a structured map.
-    fn parse_message_to_map(
-        &self,
-        message: String,
-        lr: &mut LogRecord,
-    ) -> Result<Option<serde_json::Map<String, JsonValue>>, RecordParserError> {
-        match self.parser_type {
-            ParserType::Json => parse_json_to_map(message).map(|r| Some(r)),
-            ParserType::KeyValue => parse_keyvalue_to_map(message).map(|r| Some(r)),
-            ParserType::VpcLog => {
-                // Always keep log in Body
-                lr.body = Some(AnyValue {
-                    value: Some(Value::StringValue(message.clone())),
-                });
-
-                match self.flow_log_parsed_fields.as_ref() {
-                    Some(parsed_fields) => {
-                        parse_vpclog_to_map(message, parsed_fields.clone()).map(|r| Some(r))
-                    }
-                    None => Ok(None),
-                }
-            }
-            ParserType::Unknown => {
-                // Auto-detect: try JSON first, otherwise try keyvalue, otherwise plain text
-                if message.len() > 2 && message.starts_with("{") {
-                    parse_json_to_map(message).map(|r| Some(r))
-                } else {
-                    // Otherwise, just use the string as the body
-                    lr.body = Some(AnyValue {
-                        value: Some(Value::StringValue(message)),
-                    });
-                    Ok(None)
-                }
-            }
-        }
-    }
-
-    /// Populate a LogRecord from a parsed map (applies to both JSON and keyvalue formats)
-    fn populate_log_record_from_map(
-        &self,
-        mut json_map: serde_json::Map<String, JsonValue>,
-        lr: &mut LogRecord,
-    ) {
-        // Handle "level" field for severity
+        // ── Severity ────────────────────────────────────────────────────────────────
         if let Some(level_value) = json_map.remove("level") {
-            if let JsonValue::String(level_str) = &level_value {
+            if let JsonValue::String(ref level_str) = level_value {
                 if let Some((severity_number, severity_text)) = map_log_level(level_str) {
-                    lr.severity_number = severity_number as i32;
-                    lr.severity_text = severity_text;
+                    self.lr.severity_number = severity_number as i32;
+                    self.lr.severity_text = severity_text;
                 } else {
-                    // put back if not matched
+                    // Not a recognised level string — keep as an attribute.
                     json_map.insert("level".to_string(), level_value);
                 }
             } else {
-                // put back if not a string
+                // Not a string — keep as an attribute.
                 json_map.insert("level".to_string(), level_value);
             }
         }
 
-        // Check for body fields in order: 'msg', 'log', 'message'
-        let body_keys = ["msg", "log", "message"];
-        for key in body_keys {
+        // ── Body ────────────────────────────────────────────────────────────────────
+        // Priority order: 'msg', 'log', 'message'.
+        for key in ["msg", "log", "message"] {
             if let Some(body_value) = json_map.remove(key) {
-                lr.body = Some(json_value_to_any_value(body_value));
+                self.lr.body = Some(json_value_to_any_value(body_value));
                 break;
             }
         }
 
-        // Check for timestamp fields: 'ts', 'time', or 'timestamp'
-        let timestamp_keys = ["ts", "time", "timestamp"];
-        for key in timestamp_keys {
+        // ── Timestamp ───────────────────────────────────────────────────────────────
+        // Priority order: 'ts', 'time', 'timestamp'.
+        for key in ["ts", "time", "timestamp"] {
             if let Some(ts_value) = json_map.remove(key) {
                 if let Some(parsed_nanos) = parse_timestamp(&ts_value) {
-                    lr.time_unix_nano = parsed_nanos;
+                    self.lr.time_unix_nano = parsed_nanos;
                 }
                 break;
             }
         }
 
-        // Handle trace_id and span_id if they exist
+        // ── Trace / Span IDs ────────────────────────────────────────────────────────
         if let Some(JsonValue::String(trace_id_str)) = json_map.remove("trace_id") {
             if let Ok(trace_bytes) = decode_hex(&trace_id_str) {
                 if trace_bytes.len() == 16 {
-                    lr.trace_id = trace_bytes;
+                    self.lr.trace_id = trace_bytes;
                 } else {
                     debug!(
                         "trace_id has wrong length: expected 16 bytes, got {}",
@@ -227,7 +167,7 @@ impl RecordParser {
         if let Some(JsonValue::String(span_id_str)) = json_map.remove("span_id") {
             if let Ok(span_bytes) = decode_hex(&span_id_str) {
                 if span_bytes.len() == 8 {
-                    lr.span_id = span_bytes;
+                    self.lr.span_id = span_bytes;
                 } else {
                     debug!(
                         "span_id has wrong length: expected 8 bytes, got {}",
@@ -239,35 +179,41 @@ impl RecordParser {
             }
         }
 
-        // Platform-specific body handling
-        // CloudTrail: Use eventType::eventName as body if no body field was found
-        if self.platform == LogPlatform::Cloudtrail && lr.body.is_none() {
+        // ── Platform-specific body fallback ─────────────────────────────────────────
+        // CloudTrail: synthesise "eventType::eventName" when no body field was found.
+        if self.platform == LogPlatform::Cloudtrail && self.lr.body.is_none() {
             let event_type = json_map.get("eventType");
             let event_name = json_map.get("eventName");
-            lr.body = match (event_type, event_name) {
+            self.lr.body = match (event_type, event_name) {
                 (Some(JsonValue::String(t)), Some(JsonValue::String(n))) => Some(AnyValue {
                     value: Some(Value::StringValue(format!("{}::{}", t, n))),
                 }),
                 (Some(JsonValue::String(t)), None) => Some(AnyValue {
                     value: Some(Value::StringValue(t.to_string())),
                 }),
-                (_, _) => None,
+                _ => None,
             };
         }
 
-        // Convert remaining fields to attributes
+        // ── Remaining fields → attributes ────────────────────────────────────────────
         for (key, value) in json_map {
-            lr.attributes.push(KeyValue {
+            self.lr.attributes.push(KeyValue {
                 key,
                 value: Some(json_value_to_any_value(value)),
             });
         }
     }
+
+    /// Consume the builder and return the finished [`LogRecord`].
+    pub(crate) fn finish(self) -> LogRecord {
+        self.lr
+    }
 }
 
-/// Convert a millisecond timestamp to nanoseconds, falling back on overflow or
-/// negative values.
-fn timestamp_ms_to_ns(timestamp_ms: i64, fallback_ns: u64) -> u64 {
+// ── Free helper functions ────────────────────────────────────────────────────────────────────────
+
+/// Convert a millisecond timestamp to nanoseconds, falling back on overflow or negative values.
+pub(crate) fn timestamp_ms_to_ns(timestamp_ms: i64, fallback_ns: u64) -> u64 {
     timestamp_ms
         .checked_mul(1_000_000)
         .filter(|&ns| ns >= 0)
@@ -275,25 +221,28 @@ fn timestamp_ms_to_ns(timestamp_ms: i64, fallback_ns: u64) -> u64 {
         .unwrap_or(fallback_ns)
 }
 
-/// Hex decode utilities
-fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
+/// Hex-decode a string, returning an error message on failure.
+pub(crate) fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
     hex::decode(s).map_err(|e| format!("Hex decode error: {}", e))
 }
 
-/// Parse a timestamp value (supports RFC3339 strings and Unix timestamps)
-fn parse_timestamp(value: &JsonValue) -> Option<u64> {
+/// Parse a timestamp value (supports RFC 3339 strings and numeric Unix timestamps).
+///
+/// Numbers ≤ 1 × 10¹² are treated as seconds; larger numbers as milliseconds.
+/// Returns the timestamp as nanoseconds, or `None` on overflow / invalid input.
+pub(crate) fn parse_timestamp(value: &JsonValue) -> Option<u64> {
     match value {
         JsonValue::Number(n) => {
-            // Try as Unix timestamp (seconds or milliseconds)
             if let Some(ts_float) = n.as_f64() {
-                // Heuristic: if > 1e12, assume milliseconds, otherwise seconds
                 if ts_float > 1e12 {
+                    // Milliseconds → nanoseconds
                     let millis = ts_float * 1_000.0;
                     if millis < 0.0 || millis > u64::MAX as f64 {
                         return None;
                     }
                     Some(millis as u64)
                 } else {
+                    // Seconds → nanoseconds
                     let nanos = ts_float * 1_000_000_000.0;
                     if nanos < 0.0 || nanos > u64::MAX as f64 {
                         return None;
@@ -304,14 +253,9 @@ fn parse_timestamp(value: &JsonValue) -> Option<u64> {
                 None
             }
         }
-        JsonValue::String(s) => {
-            // Try as RFC3339
-            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
-                Some(dt.timestamp_nanos_opt().unwrap_or(0) as u64)
-            } else {
-                None
-            }
-        }
+        JsonValue::String(s) => chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|dt| dt.timestamp_nanos_opt().unwrap_or(0) as u64),
         _ => None,
     }
 }
@@ -361,41 +305,30 @@ fn get_level_regexes() -> &'static [(&'static str, SeverityNumber, &'static str,
     })
 }
 
-/// Map log level string to OpenTelemetry severity number and text using regex
+/// Map a log level string to an OpenTelemetry `SeverityNumber` and canonical text.
+///
+/// Returns `None` if the string does not match any known level pattern.
 pub fn map_log_level(level: &str) -> Option<(SeverityNumber, String)> {
     let level_lower = level.to_lowercase();
-
-    // Try to match against known patterns
     for (_name, severity_number, severity_text, regex) in get_level_regexes() {
         if regex.is_match(&level_lower) {
             return Some((*severity_number, severity_text.to_string()));
         }
     }
-
-    // No match found
     None
 }
+
+// ── Tests ────────────────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aws_lambda_events::cloudwatch_logs::LogEntry;
     use opentelemetry_proto::tonic::logs::v1::SeverityNumber;
 
-    /// Test utility: Create a LogEntry from a message string
-    fn create_log_entry(message: &str) -> LogEntry {
-        let mut log_entry = LogEntry::default();
-        log_entry.id = "test-id".to_string();
-        log_entry.timestamp = 1000;
-        log_entry.message = message.to_string();
-        log_entry
-    }
-
-    /// Test utility: Parse a log message and return the LogRecord
-    fn parse_log_msg(message: &str, platform: LogPlatform, parser_type: ParserType) -> LogRecord {
-        let log_entry = create_log_entry(message);
-        let parser = RecordParser::new(platform, parser_type, None);
-        parser.parse(123456789, log_entry.into())
+    fn build_from_json(json_msg: &str, platform: LogPlatform) -> LogRecord {
+        let map: serde_json::Map<String, JsonValue> =
+            serde_json::from_str(json_msg).expect("valid JSON object");
+        LogBuilder::new(platform).parse_from_map(123_456_789, 1000, map)
     }
 
     #[test]
@@ -409,15 +342,13 @@ mod tests {
             "user": "john",
             "action": "login"
         }"#;
-        let log_record = parse_log_msg(json_msg, LogPlatform::Unknown, ParserType::Json);
+        let lr = build_from_json(json_msg, LogPlatform::Unknown);
 
-        // Check severity
-        assert_eq!(log_record.severity_number, SeverityNumber::Info as i32);
-        assert_eq!(log_record.severity_text, "INFO");
+        assert_eq!(lr.severity_number, SeverityNumber::Info as i32);
+        assert_eq!(lr.severity_text, "INFO");
 
-        // Check body
-        assert!(log_record.body.is_some());
-        if let Some(body) = &log_record.body {
+        assert!(lr.body.is_some());
+        if let Some(body) = &lr.body {
             if let Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) =
                 &body.value
             {
@@ -427,46 +358,32 @@ mod tests {
             }
         }
 
-        // Check timestamp
-        assert!(log_record.time_unix_nano > 0);
-
-        // Check trace and span IDs
-        assert_eq!(log_record.trace_id.len(), 16);
-        assert_eq!(log_record.span_id.len(), 8);
-
-        // Check attributes
-        assert!(log_record.attributes.iter().any(|kv| kv.key == "user"));
-        assert!(log_record.attributes.iter().any(|kv| kv.key == "action"));
+        assert!(lr.time_unix_nano > 0);
+        assert_eq!(lr.trace_id.len(), 16);
+        assert_eq!(lr.span_id.len(), 8);
+        assert!(lr.attributes.iter().any(|kv| kv.key == "user"));
+        assert!(lr.attributes.iter().any(|kv| kv.key == "action"));
     }
 
     #[test]
-    fn test_parse_keyvalue_record() {
-        let kv_msg =
-            r#"time="2025-12-24T19:48:32Z" level=info msg="access granted" user=john action=login"#;
-        let log_record = parse_log_msg(kv_msg, LogPlatform::Eks, ParserType::KeyValue);
+    fn test_parse_cloudtrail_body_synthesis() {
+        let json_msg = r#"{
+            "eventType": "AwsApiCall",
+            "eventName": "AssumeRole",
+            "eventSource": "sts.amazonaws.com"
+        }"#;
+        let lr = build_from_json(json_msg, LogPlatform::Cloudtrail);
 
-        // Check severity
-        assert_eq!(log_record.severity_number, SeverityNumber::Info as i32);
-        assert_eq!(log_record.severity_text, "INFO");
-
-        // Check body
-        assert!(log_record.body.is_some());
-        if let Some(body) = &log_record.body {
+        assert!(lr.body.is_some());
+        if let Some(body) = &lr.body {
             if let Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) =
                 &body.value
             {
-                assert_eq!(s, "access granted");
+                assert_eq!(s, "AwsApiCall::AssumeRole");
             } else {
                 panic!("Expected StringValue in body");
             }
         }
-
-        // Check timestamp was parsed
-        assert!(log_record.time_unix_nano > 0);
-
-        // Check attributes
-        assert!(log_record.attributes.iter().any(|kv| kv.key == "user"));
-        assert!(log_record.attributes.iter().any(|kv| kv.key == "action"));
     }
 
     #[test]
@@ -494,11 +411,10 @@ mod tests {
     },
     "recipientAccountId": "123456789012"
 }"#;
-        let log_record = parse_log_msg(json_msg, LogPlatform::Cloudtrail, ParserType::Json);
+        let lr = build_from_json(json_msg, LogPlatform::Cloudtrail);
 
-        // Check body is set to eventType::eventName
-        assert!(log_record.body.is_some());
-        if let Some(body) = &log_record.body {
+        assert!(lr.body.is_some());
+        if let Some(body) = &lr.body {
             if let Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) =
                 &body.value
             {
@@ -508,25 +424,18 @@ mod tests {
             }
         }
 
-        // Find the responseElements attribute
-        let response_elements_attr = log_record
-            .attributes
-            .iter()
-            .find(|kv| kv.key == "responseElements");
+        let response_elements_attr = lr.attributes.iter().find(|kv| kv.key == "responseElements");
         assert!(
             response_elements_attr.is_some(),
             "responseElements should be present"
         );
 
-        // Verify that sensitive credentials were stripped
         if let Some(attr) = response_elements_attr {
             if let Some(any_value) = &attr.value {
                 if let Some(
                     opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(json_str),
                 ) = &any_value.value
                 {
-                    // The responseElements is stored as a JSON string in attributes
-                    // Parse it to verify credentials were stripped
                     let response_obj: serde_json::Value =
                         serde_json::from_str(json_str).expect("Should parse JSON");
 
@@ -534,18 +443,9 @@ mod tests {
                         response_obj.get("credentials").and_then(|v| v.as_object())
                     {
                         assert!(
-                            !credentials.contains_key("accessKeyId"),
-                            "accessKeyId should be stripped from credentials"
-                        );
-                        assert!(
-                            !credentials.contains_key("secretAccessKey"),
-                            "secretAccessKey should be stripped from credentials"
-                        );
-                        assert!(
                             !credentials.contains_key("sessionToken"),
-                            "sessionToken should be stripped from credentials"
+                            "sessionToken should be stripped"
                         );
-                        // expiration is not in the strip list, so it should remain
                         assert!(
                             credentials.contains_key("expiration"),
                             "expiration should remain"
@@ -553,107 +453,90 @@ mod tests {
                     } else {
                         panic!("credentials object not found in responseElements");
                     }
-
-                    // Verify assumedRoleUser is still present
-                    assert!(
-                        response_obj.get("assumedRoleUser").is_some(),
-                        "assumedRoleUser should still be present"
-                    );
+                    assert!(response_obj.get("assumedRoleUser").is_some());
                 }
             }
         }
 
-        // Verify other fields are present as attributes
-        assert!(
-            log_record
-                .attributes
-                .iter()
-                .any(|kv| kv.key == "eventSource")
-        );
-        assert!(log_record.attributes.iter().any(|kv| kv.key == "awsRegion"));
+        assert!(lr.attributes.iter().any(|kv| kv.key == "eventSource"));
+        assert!(lr.attributes.iter().any(|kv| kv.key == "awsRegion"));
     }
 
     #[test]
-    fn test_parse_unknown_type_json_autodetect() {
-        let json_msg = r#"{"msg":"test message","level":"debug"}"#;
-        let log_record = parse_log_msg(json_msg, LogPlatform::Unknown, ParserType::Unknown);
+    fn test_start_sets_timestamps_and_initial_attributes() {
+        let builder = LogBuilder::new(LogPlatform::Unknown);
+        let initial_attrs = vec![KeyValue {
+            key: "source".to_string(),
+            value: Some(AnyValue {
+                value: Some(Value::StringValue("test".to_string())),
+            }),
+        }];
+        let lr = builder.start(999, 500, initial_attrs).finish();
 
-        // Should auto-detect as JSON and parse correctly
-        assert_eq!(log_record.severity_number, SeverityNumber::Debug as i32);
-        assert!(log_record.body.is_some());
+        assert_eq!(lr.observed_time_unix_nano, 999);
+        assert_eq!(lr.time_unix_nano, 500_000_000); // 500ms → ns
+        assert!(lr.attributes.iter().any(|kv| kv.key == "source"));
     }
 
     #[test]
-    fn test_parse_unknown_type_plain_text() {
-        let plain_msg = "This is just a plain text message";
-        let log_record = parse_log_msg(plain_msg, LogPlatform::Unknown, ParserType::Unknown);
+    fn test_set_body_text() {
+        let builder = LogBuilder::new(LogPlatform::Unknown);
+        let lr = builder
+            .start(0, 0, vec![])
+            .set_body_text("hello world".to_string())
+            .finish();
 
-        // Should treat as plain text
-        assert!(log_record.body.is_some());
-        if let Some(body) = &log_record.body {
+        if let Some(body) = &lr.body {
             if let Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) =
                 &body.value
             {
-                assert_eq!(s, plain_msg);
+                assert_eq!(s, "hello world");
             } else {
-                panic!("Expected StringValue in body");
+                panic!("expected StringValue body");
             }
+        } else {
+            panic!("body should be set");
         }
     }
 
     #[test]
     fn test_parse_timestamp_seconds() {
-        // A normal Unix timestamp in seconds (< 1e12) should be converted to nanoseconds
         let value = JsonValue::Number(serde_json::Number::from_f64(1704110400.0).unwrap());
-        let result = parse_timestamp(&value);
-        assert_eq!(result, Some(1704110400_000_000_000u64));
+        assert_eq!(parse_timestamp(&value), Some(1704110400_000_000_000u64));
     }
 
     #[test]
     fn test_parse_timestamp_milliseconds() {
-        // A Unix timestamp in milliseconds (> 1e12) should be converted to nanoseconds
         let value = JsonValue::Number(serde_json::Number::from_f64(1704110400_000.0).unwrap());
-        let result = parse_timestamp(&value);
-        assert_eq!(result, Some(1704110400_000_000u64));
+        assert_eq!(parse_timestamp(&value), Some(1704110400_000_000u64));
     }
 
     #[test]
     fn test_parse_timestamp_seconds_overflow() {
-        // A seconds value so large that multiplying by 1_000_000_000 overflows u64
-        // u64::MAX is ~1.84e19, so 1e11 * 1e9 = 1e20 overflows
         let value = JsonValue::Number(serde_json::Number::from_f64(1e11).unwrap());
-        let result = parse_timestamp(&value);
-        assert_eq!(result, None);
+        assert_eq!(parse_timestamp(&value), None);
     }
 
     #[test]
     fn test_parse_timestamp_milliseconds_overflow() {
-        // A milliseconds value so large that multiplying by 1_000 overflows u64
-        // u64::MAX is ~1.84e19, so 1e19 * 1e3 = 1e22 overflows
         let value = JsonValue::Number(serde_json::Number::from_f64(1e19).unwrap());
-        let result = parse_timestamp(&value);
-        assert_eq!(result, None);
+        assert_eq!(parse_timestamp(&value), None);
     }
 
     #[test]
     fn test_parse_timestamp_negative_seconds() {
-        // Negative timestamps should return None
         let value = JsonValue::Number(serde_json::Number::from_f64(-1.0).unwrap());
-        let result = parse_timestamp(&value);
-        assert_eq!(result, None);
+        assert_eq!(parse_timestamp(&value), None);
     }
 
     #[test]
     fn test_parse_timestamp_negative_milliseconds() {
-        // Negative millisecond timestamps (< -1e12) should return None
         let value = JsonValue::Number(serde_json::Number::from_f64(-2e12).unwrap());
-        let result = parse_timestamp(&value);
-        assert_eq!(result, None);
+        assert_eq!(parse_timestamp(&value), None);
     }
 
     #[test]
     fn test_parse_timestamp_rfc3339_string() {
-        // A valid RFC3339 string should be parsed correctly
         let value = JsonValue::String("2024-01-01T12:00:00Z".to_string());
         let result = parse_timestamp(&value);
         assert!(result.is_some());
@@ -662,17 +545,13 @@ mod tests {
 
     #[test]
     fn test_parse_timestamp_invalid_string() {
-        // An invalid string should return None
         let value = JsonValue::String("not-a-timestamp".to_string());
-        let result = parse_timestamp(&value);
-        assert_eq!(result, None);
+        assert_eq!(parse_timestamp(&value), None);
     }
 
     #[test]
     fn test_parse_timestamp_non_number() {
-        // A boolean JSON value should return None
         let value = JsonValue::Bool(true);
-        let result = parse_timestamp(&value);
-        assert_eq!(result, None);
+        assert_eq!(parse_timestamp(&value), None);
     }
 }

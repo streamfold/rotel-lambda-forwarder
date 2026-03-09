@@ -1,4 +1,5 @@
 pub mod aws_attributes;
+pub mod cwlogs;
 pub mod events;
 pub mod flowlogs;
 pub mod forward;

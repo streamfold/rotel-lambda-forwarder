@@ -14,12 +14,11 @@ use opentelemetry_proto::tonic::{
 };
 use tracing::debug;
 
-use crate::aws_attributes::AwsAttributes;
-use crate::cwlogs::ParserType;
 use crate::parse::json::parse_json_to_map;
 use crate::parse::platform::LogPlatform;
 use crate::parse::record_parser::LogBuilder;
 use crate::parse::utils::string_kv;
+use crate::{aws_attributes::AwsAttributes, s3logs::ParserType};
 
 use super::{JsonLogRecords, ParserError};
 
@@ -322,10 +321,6 @@ fn parse_line(
             } else {
                 return record_builder.set_body_text(line).finish();
             }
-        }
-        // S3 logs never produce VpcLog or KeyValue — treat as plain text.
-        _ => {
-            return record_builder.set_body_text(line).finish();
         }
     };
 

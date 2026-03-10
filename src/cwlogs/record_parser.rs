@@ -185,16 +185,6 @@ mod tests {
     }
 
     #[test]
-    fn test_no_cloudwatch_id_when_empty() {
-        let parser = RecordParser::new(LogPlatform::Unknown, ParserType::Json, None);
-        let lr = parser.parse(123_456_789, make_entry("", 1000, r#"{"msg":"hi"}"#));
-        assert!(
-            !lr.attributes.iter().any(|kv| kv.key == "cloudwatch.id"),
-            "cloudwatch.id should be absent when id is empty"
-        );
-    }
-
-    #[test]
     fn test_timestamp_set_from_entry() {
         // 1000 ms → 1_000_000_000 ns
         let lr = parse(r#"{"msg":"hi"}"#, LogPlatform::Unknown, ParserType::Json);

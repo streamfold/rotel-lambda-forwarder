@@ -141,62 +141,109 @@ impl Forwarder {
             lambda_runtime::Error::from("S3 client not initialized for S3 event processing")
         })?;
 
-        let parser = s3logs::Parser::new(aws_attributes, &context.request_id, s3_client);
+        let mut parser = s3logs::Parser::new(
+            aws_attributes,
+            &context.request_id,
+            s3_client,
+            &mut self.flow_log_manager,
+        );
 
-        // Create a channel so the parse task can stream batches of ResourceLogs to us as each
-        // S3 object completes, rather than waiting for all objects before forwarding anything.
+        // Create a channel so per-object tasks can stream batches of ResourceLogs.
         // Buffer depth matches typical max-parallel-objects (default 5) with some headroom.
         let (result_tx, mut result_rx) = tokio::sync::mpsc::channel::<Vec<ResourceLogs>>(32);
 
-        // Spawn the parse task so it runs concurrently with the forwarding loop below.
-        let parse_handle = tokio::spawn(async move { parser.parse(s3_event, result_tx).await });
-
-        // Split into counter + waiter. The drain task starts immediately inside into_parts(),
-        // so ack senders are never blocked regardless of how many messages are in flight.
+        // Split into counter + waiter before spawning anything so the drain task starts
+        // immediately and ack senders are never blocked.
         let (mut counter, waiter) = AckerBuilder::new(context.request_id.clone()).into_parts();
         let mut count: usize = 0;
 
-        // Forward each batch to logs_tx as it arrives — this runs concurrently with the parse
-        // task, giving downstream batching / exporting a head-start before parsing is complete.
-        while let Some(logs) = result_rx.recv().await {
-            for log in logs {
-                count += 1;
-                let md = MessageMetadata::forwarder(counter.increment());
-                if let Err(e) = self
-                    .logs_tx
-                    .send(Message::new(Some(md), vec![log], None))
-                    .await
-                {
-                    error!(
-                        request_id = %context.request_id,
-                        error = %e,
-                        "Failed to send logs to channel"
-                    );
-                    return Err(lambda_runtime::Error::from(format!(
-                        "Failed to send logs: {}",
-                        e
-                    )));
+        // Parser::parse (via &mut self.flow_log_manager stored in the parser) resolves
+        // per-bucket VPC flow log configs before spawning per-object sub-tasks. We cannot
+        // move &mut self into a tokio::spawn future, so we drive parse() on the current task.
+        //
+        // parse() spawns per-object tasks internally that write to result_tx, so forwarding
+        // below is still pipelined — we drain result_rx on the same task while parse() awaits
+        // its spawned sub-tasks.
+        let logs_tx = &self.logs_tx;
+        let request_id = &context.request_id;
+
+        // We interleave driving result_rx with awaiting parse() by using a select! loop so
+        // that forwarding to logs_tx stays concurrent with ongoing S3 object reads.
+        let parse_result = {
+            let parse_fut = parser.parse(s3_event, result_tx);
+            tokio::pin!(parse_fut);
+
+            let mut parse_done = false;
+            let mut parse_error: Option<s3logs::ParserError> = None;
+
+            loop {
+                tokio::select! {
+                    biased;
+
+                    // Drain completed batches as soon as they arrive.
+                    Some(logs) = result_rx.recv() => {
+                        for log in logs {
+                            count += 1;
+                            let md = MessageMetadata::forwarder(counter.increment());
+                            if let Err(e) = logs_tx
+                                .send(Message::new(Some(md), vec![log], None))
+                                .await
+                            {
+                                error!(
+                                    request_id = %request_id,
+                                    error = %e,
+                                    "Failed to send logs to channel"
+                                );
+                                return Err(lambda_runtime::Error::from(format!(
+                                    "Failed to send logs: {}",
+                                    e
+                                )));
+                            }
+                        }
+                    }
+
+                    // Await parse completion; continue draining until channel closes.
+                    result = &mut parse_fut, if !parse_done => {
+                        parse_done = true;
+                        if let Err(e) = result {
+                            parse_error = Some(e);
+                        }
+                    }
+
+                    // Channel closed and parse is done — we're finished.
+                    else => break,
                 }
             }
-        }
 
-        // The result_rx loop above ends only after result_tx is dropped, which happens when the
-        // parse task exits. Join here to surface any parse errors.
-        match parse_handle.await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                error!(
-                    request_id = %context.request_id,
-                    error = %e,
-                    "Failed to parse S3 logs"
-                );
-                return Err(lambda_runtime::Error::from(e.to_string()));
+            // Drain any remaining messages after parse() returned.
+            while let Ok(logs) = result_rx.try_recv() {
+                for log in logs {
+                    count += 1;
+                    let md = MessageMetadata::forwarder(counter.increment());
+                    if let Err(e) = logs_tx.send(Message::new(Some(md), vec![log], None)).await {
+                        error!(
+                            request_id = %request_id,
+                            error = %e,
+                            "Failed to send logs to channel"
+                        );
+                        return Err(lambda_runtime::Error::from(format!(
+                            "Failed to send logs: {}",
+                            e
+                        )));
+                    }
+                }
             }
+
+            parse_error.map(Err).unwrap_or(Ok(()))
+        };
+
+        match parse_result {
+            Ok(()) => {}
             Err(e) => {
                 error!(
                     request_id = %context.request_id,
                     error = %e,
-                    "S3 parse task panicked"
+                    "Failed to parse S3 logs"
                 );
                 return Err(lambda_runtime::Error::from(e.to_string()));
             }

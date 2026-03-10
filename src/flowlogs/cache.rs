@@ -75,7 +75,7 @@ pub enum ParsedFields {
     Error(String),
 }
 
-/// Flow log configuration for a specific log group
+/// Flow log configuration for a specific destination (log group or S3 bucket)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FlowLogConfig {
     /// The log format string (e.g., "${version} ${account-id} ${interface-id} ...")
@@ -88,17 +88,21 @@ pub struct FlowLogConfig {
     pub parsed_fields: Option<Arc<ParsedFields>>, // Use an Arc to reduce clone costs
 }
 
-/// In-memory cache for flow log configurations
+/// In-memory cache for flow log configurations, partitioned by destination type.
 ///
-/// Cache is refreshed when configurations are fetched from EC2 API.
-/// Reading from the cache does not extend the TTL - the cache expires 30 minutes
-/// after it was last refreshed from the API.
+/// Two independent look-up maps are maintained:
+/// - `by_log_group`: CloudWatch Logs destinations, keyed by log group name.
+/// - `by_bucket`:    S3 destinations, keyed by bucket name.
+///
+/// Both maps share a single TTL timestamp. The cache expires 30 minutes after it
+/// was last refreshed from the EC2 API — reading does not extend the TTL.
 ///
 /// Since all flow logs are queried together with a single DescribeFlowLogs call,
-/// the last_seen timestamp applies to the entire cache, not individual entries.
+/// the last_refreshed timestamp applies to the entire cache, not individual entries.
 #[derive(Debug, Clone)]
 pub struct FlowLogCache {
-    inner: HashMap<String, FlowLogConfig>,
+    by_log_group: HashMap<String, FlowLogConfig>,
+    by_bucket: HashMap<String, FlowLogConfig>,
     /// Unix timestamp in seconds when the cache was last refreshed from EC2 API
     last_refreshed_secs: u64,
 }
@@ -106,51 +110,117 @@ pub struct FlowLogCache {
 impl FlowLogCache {
     pub fn new() -> Self {
         Self {
-            inner: HashMap::new(),
+            by_log_group: HashMap::new(),
+            by_bucket: HashMap::new(),
             last_refreshed_secs: 0,
         }
     }
 
-    /// Get flow log configuration for a log group if it exists and cache is not expired
-    /// Returns None if not found or cache is expired
-    ///
-    /// Note: This does not update the timestamp - cache expires 30 minutes
-    /// after it was last refreshed from the API.
-    pub fn get(&self, log_group: &str) -> Option<FlowLogConfig> {
+    // -----------------------------------------------------------------------
+    // CloudWatch look-ups (keyed by log group name)
+    // -----------------------------------------------------------------------
+
+    /// Get flow log configuration for a CloudWatch log group.
+    /// Returns `None` if not found or the cache is expired.
+    pub fn get_by_log_group(&self, log_group: &str) -> Option<FlowLogConfig> {
         if self.is_expired() {
             debug!("Cache expired");
             return None;
         }
 
-        if let Some(config) = self.inner.get(log_group) {
-            trace!(log_group = %log_group, "Cache hit");
+        if let Some(config) = self.by_log_group.get(log_group) {
+            trace!(log_group = %log_group, "Cache hit (by_log_group)");
             Some(config.clone())
         } else {
-            trace!(log_group = %log_group, "Cache miss");
+            trace!(log_group = %log_group, "Cache miss (by_log_group)");
             None
         }
     }
 
-    /// Get mutable reference to flow log configuration for a log group
-    /// Returns None if not found or cache is expired
+    /// Get a mutable reference to the flow log configuration for a CloudWatch log group.
+    /// Returns `None` if not found or the cache is expired.
     ///
-    /// This is used for lazy initialization of parsed fields.
-    pub fn get_mut(&mut self, log_group: &str) -> Option<&mut FlowLogConfig> {
+    /// Used for lazy initialisation of parsed fields.
+    pub fn get_mut_by_log_group(&mut self, log_group: &str) -> Option<&mut FlowLogConfig> {
         if self.is_expired() {
             debug!("Cache expired");
             return None;
         }
 
-        if let Some(config) = self.inner.get_mut(log_group) {
-            trace!(log_group = %log_group, "Cache hit (mutable)");
+        if let Some(config) = self.by_log_group.get_mut(log_group) {
+            trace!(log_group = %log_group, "Cache hit mutable (by_log_group)");
             Some(config)
         } else {
-            trace!(log_group = %log_group, "Cache miss");
+            trace!(log_group = %log_group, "Cache miss (by_log_group)");
             None
         }
     }
 
-    /// Check if the entire cache is expired (older than 30 minutes)
+    /// Insert or update a CloudWatch flow log configuration.
+    pub fn insert_by_log_group(&mut self, log_group: String, config: FlowLogConfig) {
+        debug!(
+            log_group = %log_group,
+            flow_log_id = %config.flow_log_id,
+            "Inserting flow log config into cache (by_log_group)"
+        );
+        self.by_log_group.insert(log_group, config);
+    }
+
+    // -----------------------------------------------------------------------
+    // S3 look-ups (keyed by bucket name)
+    // -----------------------------------------------------------------------
+
+    /// Get flow log configuration for an S3 bucket.
+    /// Returns `None` if not found or the cache is expired.
+    pub fn get_by_bucket(&self, bucket: &str) -> Option<FlowLogConfig> {
+        if self.is_expired() {
+            debug!("Cache expired");
+            return None;
+        }
+
+        if let Some(config) = self.by_bucket.get(bucket) {
+            trace!(bucket = %bucket, "Cache hit (by_bucket)");
+            Some(config.clone())
+        } else {
+            trace!(bucket = %bucket, "Cache miss (by_bucket)");
+            None
+        }
+    }
+
+    /// Get a mutable reference to the flow log configuration for an S3 bucket.
+    /// Returns `None` if not found or the cache is expired.
+    ///
+    /// Used for lazy initialisation of parsed fields.
+    pub fn get_mut_by_bucket(&mut self, bucket: &str) -> Option<&mut FlowLogConfig> {
+        if self.is_expired() {
+            debug!("Cache expired");
+            return None;
+        }
+
+        if let Some(config) = self.by_bucket.get_mut(bucket) {
+            trace!(bucket = %bucket, "Cache hit mutable (by_bucket)");
+            Some(config)
+        } else {
+            trace!(bucket = %bucket, "Cache miss (by_bucket)");
+            None
+        }
+    }
+
+    /// Insert or update an S3 flow log configuration.
+    pub fn insert_by_bucket(&mut self, bucket: String, config: FlowLogConfig) {
+        debug!(
+            bucket = %bucket,
+            flow_log_id = %config.flow_log_id,
+            "Inserting flow log config into cache (by_bucket)"
+        );
+        self.by_bucket.insert(bucket, config);
+    }
+
+    // -----------------------------------------------------------------------
+    // TTL / lifecycle helpers
+    // -----------------------------------------------------------------------
+
+    /// Check if the entire cache is expired (older than 30 minutes).
     pub fn is_expired(&self) -> bool {
         if self.last_refreshed_secs == 0 {
             return true; // Never been refreshed
@@ -165,18 +235,10 @@ impl FlowLogCache {
         age_secs > MAX_CACHE_AGE_SECS
     }
 
-    /// Insert or update flow log configuration for a log group
+    /// Mark the cache as refreshed with the current timestamp.
     ///
-    /// Should only be called when configuration is freshly fetched from EC2 API.
-    pub fn insert(&mut self, log_group: String, config: FlowLogConfig) {
-        debug!(log_group = %log_group, flow_log_id = %config.flow_log_id, "Inserting flow log config into cache");
-        self.inner.insert(log_group, config);
-    }
-
-    /// Mark the cache as refreshed with the current timestamp
-    ///
-    /// This should be called after successfully fetching flow logs from EC2 API.
-    /// It resets the 30-minute TTL for the entire cache.
+    /// Should be called after successfully fetching flow logs from the EC2 API.
+    /// Resets the 30-minute TTL for the entire cache.
     pub fn mark_refreshed(&mut self) {
         self.last_refreshed_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -188,58 +250,68 @@ impl FlowLogCache {
         );
     }
 
-    /// Get a snapshot of the current cache with timestamp
+    /// Get a serialisable snapshot of the current cache contents and timestamp.
     pub fn get_snapshot(&self) -> CacheSnapshot {
         CacheSnapshot {
-            flow_logs: self.inner.clone(),
+            by_log_group: self.by_log_group.clone(),
+            by_bucket: self.by_bucket.clone(),
             last_refreshed_secs: self.last_refreshed_secs,
         }
     }
 
-    /// Load entries from a snapshot (used when restoring from S3)
+    /// Restore cache contents from a snapshot (used when reloading from S3 persistence).
+    ///
+    /// Expired snapshots are silently ignored.
     pub fn load_snapshot(&mut self, snapshot: CacheSnapshot) {
         debug!(
-            entry_count = snapshot.flow_logs.len(),
+            log_group_count = snapshot.by_log_group.len(),
+            bucket_count = snapshot.by_bucket.len(),
             "Loading snapshot into cache"
         );
 
         if !snapshot.is_expired() {
-            self.inner = snapshot.flow_logs;
+            self.by_log_group = snapshot.by_log_group;
+            self.by_bucket = snapshot.by_bucket;
             self.last_refreshed_secs = snapshot.last_refreshed_secs;
         } else {
             debug!("Snapshot is expired, not loading");
         }
     }
 
-    /// Get the number of entries in the cache
+    /// Total number of cached entries across both destination maps.
     pub fn len(&self) -> usize {
-        self.inner.len()
+        self.by_log_group.len() + self.by_bucket.len()
     }
 
-    /// Check if the cache is empty
+    /// Returns `true` if both destination maps are empty.
     pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
+        self.by_log_group.is_empty() && self.by_bucket.is_empty()
     }
 
-    /// Clear all entries from the cache and reset timestamp
+    /// Clear all entries from both maps and reset the timestamp.
     #[cfg(test)]
     pub fn clear(&mut self) {
-        self.inner.clear();
+        self.by_log_group.clear();
+        self.by_bucket.clear();
         self.last_refreshed_secs = 0;
     }
 }
 
-/// Snapshot of the flow log cache for serialization/deserialization
+/// Serialisable snapshot of the flow log cache for persistence (e.g. S3).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheSnapshot {
-    /// Map of log group names to their flow log configurations
-    pub flow_logs: HashMap<String, FlowLogConfig>,
-    /// Unix timestamp in seconds when the cache was last refreshed
+    /// CloudWatch flow logs: log_group_name → config
+    #[serde(default)]
+    pub by_log_group: HashMap<String, FlowLogConfig>,
+    /// S3 flow logs: bucket_name → config
+    #[serde(default)]
+    pub by_bucket: HashMap<String, FlowLogConfig>,
+    /// Unix timestamp (seconds) when the cache was last refreshed
     pub last_refreshed_secs: u64,
 }
 
 impl CacheSnapshot {
-    /// Check if this snapshot is expired (older than 30 minutes)
+    /// Check if this snapshot is expired (older than 30 minutes).
     pub fn is_expired(&self) -> bool {
         if self.last_refreshed_secs == 0 {
             return true;
@@ -260,30 +332,104 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    // ------------------------------------------------------------------
+    // CloudWatch (by_log_group) tests
+    // ------------------------------------------------------------------
+
     #[test]
-    fn test_cache_insert_and_get() {
+    fn test_cache_insert_and_get_by_log_group() {
         let mut cache = FlowLogCache::new();
         let config = FlowLogConfig {
             log_format: "${version} ${account-id} ${interface-id}".to_string(),
             flow_log_id: "fl-1234567890abcdef0".to_string(),
-            tags: std::collections::HashMap::new(),
+            tags: HashMap::new(),
             parsed_fields: None,
         };
 
-        cache.insert("/aws/ec2/flowlogs".to_string(), config.clone());
+        cache.insert_by_log_group("/aws/ec2/flowlogs".to_string(), config.clone());
         cache.mark_refreshed();
 
-        let retrieved = cache.get("/aws/ec2/flowlogs");
+        let retrieved = cache.get_by_log_group("/aws/ec2/flowlogs");
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap(), config);
     }
 
     #[test]
-    fn test_cache_miss() {
+    fn test_cache_miss_by_log_group() {
         let cache = FlowLogCache::new();
-        let retrieved = cache.get("non-existent");
+        let retrieved = cache.get_by_log_group("non-existent");
         assert!(retrieved.is_none());
     }
+
+    // ------------------------------------------------------------------
+    // S3 (by_bucket) tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_cache_insert_and_get_by_bucket() {
+        let mut cache = FlowLogCache::new();
+        let config = FlowLogConfig {
+            log_format: "${version} ${account-id} ${interface-id}".to_string(),
+            flow_log_id: "fl-s3-abc123".to_string(),
+            tags: HashMap::new(),
+            parsed_fields: None,
+        };
+
+        cache.insert_by_bucket("my-flow-logs-bucket".to_string(), config.clone());
+        cache.mark_refreshed();
+
+        let retrieved = cache.get_by_bucket("my-flow-logs-bucket");
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap(), config);
+    }
+
+    #[test]
+    fn test_cache_miss_by_bucket() {
+        let cache = FlowLogCache::new();
+        let retrieved = cache.get_by_bucket("non-existent-bucket");
+        assert!(retrieved.is_none());
+    }
+
+    #[test]
+    fn test_cache_len_counts_both_maps() {
+        let mut cache = FlowLogCache::new();
+
+        let config = FlowLogConfig {
+            log_format: "${version} ${account-id}".to_string(),
+            flow_log_id: "fl-xxx".to_string(),
+            tags: HashMap::new(),
+            parsed_fields: None,
+        };
+
+        cache.insert_by_log_group("/aws/ec2/flowlogs".to_string(), config.clone());
+        cache.insert_by_bucket("my-bucket".to_string(), config.clone());
+        cache.mark_refreshed();
+
+        assert_eq!(cache.len(), 2);
+        assert!(!cache.is_empty());
+    }
+
+    #[test]
+    fn test_cache_clear() {
+        let mut cache = FlowLogCache::new();
+        let config = FlowLogConfig {
+            log_format: "${version}".to_string(),
+            flow_log_id: "fl-yyy".to_string(),
+            tags: HashMap::new(),
+            parsed_fields: None,
+        };
+        cache.insert_by_log_group("group".to_string(), config.clone());
+        cache.insert_by_bucket("bucket".to_string(), config);
+        cache.mark_refreshed();
+
+        cache.clear();
+        assert!(cache.is_empty());
+        assert!(cache.is_expired());
+    }
+
+    // ------------------------------------------------------------------
+    // Expiration tests
+    // ------------------------------------------------------------------
 
     #[test]
     fn test_cache_expiration() {
@@ -305,54 +451,68 @@ mod tests {
         assert!(cache.is_expired());
     }
 
+    // ------------------------------------------------------------------
+    // Snapshot tests
+    // ------------------------------------------------------------------
+
     #[test]
-    fn test_snapshot() {
+    fn test_snapshot_round_trip() {
         let mut cache = FlowLogCache::new();
 
-        let config1 = FlowLogConfig {
+        let cw_config = FlowLogConfig {
             log_format: "${version} ${account-id}".to_string(),
-            flow_log_id: "fl-111".to_string(),
-            tags: std::collections::HashMap::new(),
+            flow_log_id: "fl-cw-111".to_string(),
+            tags: HashMap::new(),
             parsed_fields: None,
         };
-        cache.insert("/aws/ec2/flowlogs1".to_string(), config1.clone());
-
-        let config2 = FlowLogConfig {
+        let s3_config = FlowLogConfig {
             log_format: "${version} ${interface-id}".to_string(),
-            flow_log_id: "fl-222".to_string(),
-            tags: std::collections::HashMap::new(),
+            flow_log_id: "fl-s3-222".to_string(),
+            tags: HashMap::new(),
             parsed_fields: None,
         };
-        cache.insert("/aws/ec2/flowlogs2".to_string(), config2.clone());
+
+        cache.insert_by_log_group("/aws/ec2/flowlogs".to_string(), cw_config.clone());
+        cache.insert_by_bucket("my-bucket".to_string(), s3_config.clone());
         cache.mark_refreshed();
 
         let snapshot = cache.get_snapshot();
-        assert_eq!(snapshot.flow_logs.len(), 2);
+        assert_eq!(snapshot.by_log_group.len(), 1);
+        assert_eq!(snapshot.by_bucket.len(), 1);
         assert_eq!(
-            snapshot.flow_logs.get("/aws/ec2/flowlogs1").unwrap(),
-            &config1
+            snapshot.by_log_group.get("/aws/ec2/flowlogs").unwrap(),
+            &cw_config
         );
-        assert_eq!(
-            snapshot.flow_logs.get("/aws/ec2/flowlogs2").unwrap(),
-            &config2
-        );
+        assert_eq!(snapshot.by_bucket.get("my-bucket").unwrap(), &s3_config);
     }
 
     #[test]
     fn test_load_snapshot() {
         let mut cache = FlowLogCache::new();
 
-        let config = FlowLogConfig {
+        let cw_config = FlowLogConfig {
             log_format: "${version} ${account-id}".to_string(),
-            flow_log_id: "fl-123".to_string(),
-            tags: std::collections::HashMap::new(),
+            flow_log_id: "fl-cw-123".to_string(),
+            tags: HashMap::new(),
             parsed_fields: None,
         };
+        let s3_config = FlowLogConfig {
+            log_format: "${version} ${srcaddr}".to_string(),
+            flow_log_id: "fl-s3-456".to_string(),
+            tags: HashMap::new(),
+            parsed_fields: None,
+        };
+
         let snapshot = CacheSnapshot {
-            flow_logs: {
-                let mut map = HashMap::new();
-                map.insert("/aws/ec2/flowlogs".to_string(), config.clone());
-                map
+            by_log_group: {
+                let mut m = HashMap::new();
+                m.insert("/aws/ec2/flowlogs".to_string(), cw_config.clone());
+                m
+            },
+            by_bucket: {
+                let mut m = HashMap::new();
+                m.insert("my-bucket".to_string(), s3_config.clone());
+                m
             },
             last_refreshed_secs: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -362,17 +522,54 @@ mod tests {
 
         cache.load_snapshot(snapshot);
 
-        let retrieved = cache.get("/aws/ec2/flowlogs");
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap(), config);
+        assert_eq!(
+            cache.get_by_log_group("/aws/ec2/flowlogs").unwrap(),
+            cw_config
+        );
+        assert_eq!(cache.get_by_bucket("my-bucket").unwrap(), s3_config);
     }
+
+    #[test]
+    fn test_load_expired_snapshot_is_ignored() {
+        let mut cache = FlowLogCache::new();
+
+        let config = FlowLogConfig {
+            log_format: "${version}".to_string(),
+            flow_log_id: "fl-old".to_string(),
+            tags: HashMap::new(),
+            parsed_fields: None,
+        };
+
+        let snapshot = CacheSnapshot {
+            by_log_group: {
+                let mut m = HashMap::new();
+                m.insert("/old/group".to_string(), config);
+                m
+            },
+            by_bucket: HashMap::new(),
+            last_refreshed_secs: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                .saturating_sub(31 * 60), // expired
+        };
+
+        cache.load_snapshot(snapshot);
+
+        // Cache should remain empty / expired
+        assert!(cache.is_expired());
+        assert!(cache.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Tags test
+    // ------------------------------------------------------------------
 
     #[test]
     fn test_flow_log_config_with_tags() {
         let mut cache = FlowLogCache::new();
 
-        // Create config with tags
-        let mut tags = std::collections::HashMap::new();
+        let mut tags = HashMap::new();
         tags.insert("Environment".to_string(), "production".to_string());
         tags.insert("Team".to_string(), "platform".to_string());
         tags.insert("Application".to_string(), "vpc-monitoring".to_string());
@@ -384,36 +581,28 @@ mod tests {
             parsed_fields: None,
         };
 
-        cache.insert("/aws/ec2/flowlogs".to_string(), config.clone());
+        cache.insert_by_log_group("/aws/ec2/flowlogs".to_string(), config.clone());
         cache.mark_refreshed();
 
-        let retrieved = cache.get("/aws/ec2/flowlogs");
-        assert!(retrieved.is_some());
-
-        let retrieved_config = retrieved.unwrap();
-        assert_eq!(retrieved_config.tags.len(), 3);
-        assert_eq!(
-            retrieved_config.tags.get("Environment").unwrap(),
-            "production"
-        );
-        assert_eq!(retrieved_config.tags.get("Team").unwrap(), "platform");
-        assert_eq!(
-            retrieved_config.tags.get("Application").unwrap(),
-            "vpc-monitoring"
-        );
+        let retrieved = cache.get_by_log_group("/aws/ec2/flowlogs").unwrap();
+        assert_eq!(retrieved.tags.len(), 3);
+        assert_eq!(retrieved.tags.get("Environment").unwrap(), "production");
+        assert_eq!(retrieved.tags.get("Team").unwrap(), "platform");
+        assert_eq!(retrieved.tags.get("Application").unwrap(), "vpc-monitoring");
     }
+
+    // ------------------------------------------------------------------
+    // Field-type tests (unchanged from original)
+    // ------------------------------------------------------------------
 
     #[test]
     fn test_parsed_field_type_mapping() {
-        // Test some known fields
         assert_eq!(get_field_type("version"), ParsedFieldType::Int32);
         assert_eq!(get_field_type("account-id"), ParsedFieldType::String);
         assert_eq!(get_field_type("srcport"), ParsedFieldType::Int32);
         assert_eq!(get_field_type("packets"), ParsedFieldType::Int64);
         assert_eq!(get_field_type("bytes"), ParsedFieldType::Int64);
         assert_eq!(get_field_type("action"), ParsedFieldType::String);
-
-        // Test unknown field defaults to String
         assert_eq!(get_field_type("unknown-field"), ParsedFieldType::String);
     }
 
@@ -431,7 +620,6 @@ mod tests {
             ParsedField::new("account-id".to_string(), ParsedFieldType::String),
         ];
         let parsed = ParsedFields::Success(fields.clone());
-
         assert_eq!(parsed, ParsedFields::Success(fields));
     }
 
@@ -439,7 +627,6 @@ mod tests {
     fn test_parsed_fields_error() {
         let error_msg = "Invalid format string".to_string();
         let parsed = ParsedFields::Error(error_msg.clone());
-
         assert_eq!(parsed, ParsedFields::Error(error_msg));
     }
 
@@ -450,22 +637,19 @@ mod tests {
         let config = FlowLogConfig {
             log_format: "${version} ${account-id}".to_string(),
             flow_log_id: "fl-123".to_string(),
-            tags: std::collections::HashMap::new(),
+            tags: HashMap::new(),
             parsed_fields: Some(Arc::new(ParsedFields::Success(vec![
                 ParsedField::new("version".to_string(), ParsedFieldType::Int32),
                 ParsedField::new("account-id".to_string(), ParsedFieldType::String),
             ]))),
         };
 
-        cache.insert("/aws/ec2/flowlogs".to_string(), config.clone());
+        cache.insert_by_log_group("/aws/ec2/flowlogs".to_string(), config.clone());
         cache.mark_refreshed();
 
-        let retrieved = cache.get("/aws/ec2/flowlogs");
-        assert!(retrieved.is_some());
-
-        let retrieved_config = retrieved.unwrap();
-        assert!(retrieved_config.parsed_fields.is_some());
-        if let Some(parsed_fields) = &retrieved_config.parsed_fields {
+        let retrieved = cache.get_by_log_group("/aws/ec2/flowlogs").unwrap();
+        assert!(retrieved.parsed_fields.is_some());
+        if let Some(parsed_fields) = &retrieved.parsed_fields {
             if let ParsedFields::Success(fields) = parsed_fields.as_ref() {
                 assert_eq!(fields.len(), 2);
                 assert_eq!(fields[0].field_name, "version");
@@ -475,8 +659,6 @@ mod tests {
             } else {
                 panic!("Expected ParsedFields::Success");
             }
-        } else {
-            panic!("Expected Some(parsed_fields)");
         }
     }
 
@@ -487,24 +669,19 @@ mod tests {
         let config = FlowLogConfig {
             log_format: "invalid format".to_string(),
             flow_log_id: "fl-123".to_string(),
-            tags: std::collections::HashMap::new(),
+            tags: HashMap::new(),
             parsed_fields: Some(Arc::new(ParsedFields::Error("Parse failed".to_string()))),
         };
 
-        cache.insert("/aws/ec2/flowlogs".to_string(), config.clone());
+        cache.insert_by_log_group("/aws/ec2/flowlogs".to_string(), config);
         cache.mark_refreshed();
 
-        let retrieved = cache.get("/aws/ec2/flowlogs");
-        assert!(retrieved.is_some());
-
-        let retrieved_config = retrieved.unwrap();
-        assert!(retrieved_config.parsed_fields.is_some());
-
-        if let Some(parsed_fields) = &retrieved_config.parsed_fields {
+        let retrieved = cache.get_by_log_group("/aws/ec2/flowlogs").unwrap();
+        if let Some(parsed_fields) = &retrieved.parsed_fields {
             if let ParsedFields::Error(msg) = parsed_fields.as_ref() {
                 assert_eq!(msg, "Parse failed");
             } else {
-                panic!("Expected ParsedFields::Error")
+                panic!("Expected ParsedFields::Error");
             }
         } else {
             panic!("Expected Some(parsed_fields)");

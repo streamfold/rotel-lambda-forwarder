@@ -7,6 +7,10 @@
 //! - Caching configurations in-memory with 30-minute TTL
 //! - Persisting configurations to S3 for durability across Lambda cold starts
 //!
+//! Flow logs are indexed by destination type:
+//! - CloudWatch Logs destinations: looked up by log group name via `get_config`
+//! - S3 destinations: looked up by bucket name via `get_config_by_bucket`
+//!
 
 mod cache;
 mod ec2;
@@ -70,6 +74,10 @@ impl FlowLogCacheFile {
 /// in memory with a 30-minute TTL. Optionally, configs can be persisted to S3 for
 /// durability across Lambda cold starts.
 ///
+/// Two lookup methods are provided:
+/// - [`get_config`]: look up by CloudWatch log group name (CloudWatch Logs destinations)
+/// - [`get_config_by_bucket`]: look up by S3 bucket name (S3 destinations)
+///
 pub struct FlowLogManager {
     cache: FlowLogCache,
     s3_cache: Option<S3Cache<FlowLogCacheFile>>,
@@ -123,7 +131,7 @@ impl FlowLogManager {
     ///
     /// First attempts to load a valid (non-expired) cache from S3.
     /// If S3 cache doesn't exist or is expired, fetches from EC2.
-    /// Returns Ok(true) if cache was successfully loaded/refreshed, Ok(false) if using existing cache.
+    /// Returns Ok(()) if cache was successfully loaded/refreshed.
     async fn reload_cache_if_needed(&mut self) -> Result<(), Ec2Error> {
         // Check if fetching is currently disabled due to AccessDenied
         if let Some(disabled_until) = self.fetch_disabled_until {
@@ -148,7 +156,8 @@ impl FlowLogManager {
                 Ok(Some(cache_file)) => {
                     let is_expired = cache_file.snapshot.is_expired();
                     info!(
-                        entry_count = cache_file.snapshot.flow_logs.len(),
+                        log_group_count = cache_file.snapshot.by_log_group.len(),
+                        bucket_count = cache_file.snapshot.by_bucket.len(),
                         expired = is_expired,
                         "Loaded flow log cache from S3"
                     );
@@ -198,18 +207,52 @@ impl FlowLogManager {
         }
     }
 
-    /// Get flow log configuration for a log group
-    /// First checks the in-memory cache. Returns None if not found or expired.
-    /// Lazily parses the log format fields on first access and caches the result.
+    /// Get flow log configuration for a CloudWatch log group name.
+    ///
+    /// Checks the in-memory cache first. If the cache is expired it attempts a reload
+    /// from S3 / EC2 before returning. Returns `None` if no matching configuration is
+    /// found or if the cache cannot be refreshed.
+    ///
+    /// Parsed fields are lazily initialised on first access and stored back into the
+    /// cache to avoid re-parsing on subsequent calls.
     pub async fn get_config(&mut self, log_group_name: &str) -> Option<FlowLogConfig> {
-        // Check if cache is expired
+        self.ensure_cache_fresh(log_group_name, "log_group").await?;
+
+        // Get a mutable reference to the config so we can parse fields if needed
+        let config = self.cache.get_mut_by_log_group(log_group_name)?;
+        Self::ensure_parsed_fields(config, log_group_name, "log_group");
+        Some(config.clone())
+    }
+
+    /// Get flow log configuration for an S3 bucket name.
+    ///
+    /// Mirrors [`get_config`] but looks up by the S3 bucket name rather than a
+    /// CloudWatch log group name. This is used when processing VPC flow log files
+    /// delivered to S3.
+    pub async fn get_config_by_bucket(&mut self, bucket_name: &str) -> Option<FlowLogConfig> {
+        self.ensure_cache_fresh(bucket_name, "bucket").await?;
+
+        let config = self.cache.get_mut_by_bucket(bucket_name)?;
+        Self::ensure_parsed_fields(config, bucket_name, "bucket");
+        Some(config.clone())
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal helpers shared by both lookup methods
+    // -----------------------------------------------------------------------
+
+    /// Ensure the cache is not expired, reloading if necessary.
+    ///
+    /// Returns `Some(())` if the cache is usable (or was successfully reloaded),
+    /// and `None` if it could not be refreshed.
+    async fn ensure_cache_fresh(&mut self, key: &str, key_type: &str) -> Option<()> {
         if self.cache.is_expired() {
             debug!(
-                log_group = %log_group_name,
+                key = %key,
+                key_type = %key_type,
                 "Cache expired, attempting to reload"
             );
 
-            // Attempt to reload cache from S3 or EC2
             match self.reload_cache_if_needed().await {
                 Ok(_) => {
                     debug!("Successfully reloaded flow log cache");
@@ -217,60 +260,62 @@ impl FlowLogManager {
                 Err(e) => {
                     warn!(
                         error = %e,
-                        log_group = %log_group_name,
+                        key = %key,
+                        key_type = %key_type,
                         "Cache expired and could not be reloaded"
                     );
                     return None;
                 }
             }
         }
+        Some(())
+    }
 
-        // Get a mutable reference to the config so we can parse fields if needed
-        let config = self.cache.get_mut(log_group_name)?;
-
-        // Parse fields if not already attempted
+    /// Lazily parse log format fields into `config.parsed_fields` if not already done.
+    fn ensure_parsed_fields(config: &mut FlowLogConfig, key: &str, key_type: &str) {
         if config.parsed_fields.is_none() {
             let fields = parse_log_format(&config.log_format);
 
             if fields.is_empty() {
-                // Parsing failed - cache the error
                 config.parsed_fields = Some(Arc::new(ParsedFields::Error(
                     "Failed to parse log format or no fields found".to_string(),
                 )));
                 warn!(
-                    log_group = %log_group_name,
+                    key = %key,
+                    key_type = %key_type,
                     log_format = %config.log_format,
                     "Failed to parse flow log format fields"
                 );
             } else {
-                // Parsing succeeded - cache the result
                 let field_count = fields.len();
                 config.parsed_fields = Some(Arc::new(ParsedFields::Success(fields)));
                 debug!(
-                    log_group = %log_group_name,
+                    key = %key,
+                    key_type = %key_type,
                     field_count = field_count,
                     "Parsed log format fields with types for flow log"
                 );
             }
         }
-
-        Some(config.clone())
     }
 
-    /// Fetch all flow logs from EC2 and update the cache
+    /// Fetch all flow logs from EC2 and update both cache maps
     async fn fetch_and_update_all(&mut self) -> Result<(), Ec2Error> {
         debug!("Fetching flow logs from EC2");
 
-        let flow_log_configs = match self.ec2_fetcher.fetch_all_flow_logs().await {
-            Ok(configs) => configs,
-            Err(e) => {
-                return Err(e);
-            }
+        let fetched = match self.ec2_fetcher.fetch_all_flow_logs().await {
+            Ok(f) => f,
+            Err(e) => return Err(e),
         };
 
-        // Update cache with fetched configurations
-        for (log_group, config) in flow_log_configs {
-            self.cache.insert(log_group, config);
+        // Update CloudWatch cache entries
+        for (log_group, config) in fetched.by_log_group {
+            self.cache.insert_by_log_group(log_group, config);
+        }
+
+        // Update S3 cache entries
+        for (bucket, config) in fetched.by_bucket {
+            self.cache.insert_by_bucket(bucket, config);
         }
 
         // Mark the cache as refreshed
@@ -322,7 +367,7 @@ impl FlowLogManager {
                         })
                         .await?;
 
-                    // Replace out local cache with the most recent snapshot
+                    // Replace our local cache with the most recent snapshot
                     self.cache.load_snapshot(merged.snapshot.clone());
 
                     // Try to save again with the merged data. It is possible this
@@ -456,7 +501,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cache_reuse_optimization() {
+    async fn test_cache_reuse_optimization_by_log_group() {
         use crate::flowlogs::cache::{CacheSnapshot, FlowLogConfig};
         use std::collections::HashMap;
 
@@ -465,9 +510,9 @@ mod tests {
 
         let mut manager = FlowLogManager::new(ec2_client, None, None);
 
-        // Manually insert a valid cache entry
-        let mut flow_logs = HashMap::new();
-        flow_logs.insert(
+        // Manually insert a valid cache entry via a snapshot
+        let mut by_log_group = HashMap::new();
+        by_log_group.insert(
             "/aws/ec2/test-flowlogs".to_string(),
             FlowLogConfig {
                 log_format: "${version} ${account-id}".to_string(),
@@ -478,7 +523,8 @@ mod tests {
         );
 
         let snapshot = CacheSnapshot {
-            flow_logs,
+            by_log_group,
+            by_bucket: HashMap::new(),
             last_refreshed_secs: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -487,13 +533,79 @@ mod tests {
 
         manager.cache.load_snapshot(snapshot);
 
-        // Verify cache has the entry and is not expired
         assert!(!manager.cache.is_expired());
         assert_eq!(manager.cache.len(), 1);
 
         let config = manager.get_config("/aws/ec2/test-flowlogs").await;
         assert!(config.is_some());
         assert_eq!(config.unwrap().flow_log_id, "fl-test123");
+    }
+
+    #[tokio::test]
+    async fn test_cache_reuse_optimization_by_bucket() {
+        use crate::flowlogs::cache::{CacheSnapshot, FlowLogConfig};
+        use std::collections::HashMap;
+
+        let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
+        let ec2_client = Ec2Client::new(&config);
+
+        let mut manager = FlowLogManager::new(ec2_client, None, None);
+
+        let mut by_bucket = HashMap::new();
+        by_bucket.insert(
+            "my-flow-logs-bucket".to_string(),
+            FlowLogConfig {
+                log_format: "${version} ${account-id} ${srcaddr}".to_string(),
+                flow_log_id: "fl-s3-abc456".to_string(),
+                tags: HashMap::new(),
+                parsed_fields: None,
+            },
+        );
+
+        let snapshot = CacheSnapshot {
+            by_log_group: HashMap::new(),
+            by_bucket,
+            last_refreshed_secs: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        };
+
+        manager.cache.load_snapshot(snapshot);
+
+        assert!(!manager.cache.is_expired());
+        assert_eq!(manager.cache.len(), 1);
+
+        let config = manager.get_config_by_bucket("my-flow-logs-bucket").await;
+        assert!(config.is_some());
+        let config = config.unwrap();
+        assert_eq!(config.flow_log_id, "fl-s3-abc456");
+        // Parsed fields should have been lazily populated
+        assert!(config.parsed_fields.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_get_config_by_bucket_miss() {
+        use std::collections::HashMap;
+
+        let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
+        let ec2_client = Ec2Client::new(&config);
+
+        let mut manager = FlowLogManager::new(ec2_client, None, None);
+
+        // Seed with a fresh (non-expired) empty cache so we don't attempt an EC2 fetch
+        let snapshot = crate::flowlogs::cache::CacheSnapshot {
+            by_log_group: HashMap::new(),
+            by_bucket: HashMap::new(),
+            last_refreshed_secs: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        };
+        manager.cache.load_snapshot(snapshot);
+
+        let result = manager.get_config_by_bucket("non-existent-bucket").await;
+        assert!(result.is_none());
     }
 
     #[test]
@@ -544,8 +656,8 @@ mod tests {
         let mut manager = FlowLogManager::new(ec2_client, None, None);
 
         // Manually insert a cache entry with an expired timestamp
-        let mut flow_logs = HashMap::new();
-        flow_logs.insert(
+        let mut by_log_group = HashMap::new();
+        by_log_group.insert(
             "/aws/ec2/expired-flowlogs".to_string(),
             FlowLogConfig {
                 log_format: "${version} ${account-id}".to_string(),
@@ -563,16 +675,15 @@ mod tests {
             - 1900; // 31+ minutes ago
 
         let snapshot = CacheSnapshot {
-            flow_logs,
+            by_log_group,
+            by_bucket: HashMap::new(),
             last_refreshed_secs: expired_time,
         };
 
         manager.cache.load_snapshot(snapshot);
 
-        // Verify cache is expired but entries are still present
+        // load_snapshot ignores expired snapshots, so cache should be empty & expired
         assert!(manager.cache.is_expired());
-        // Note: cache.len() still returns 1 because expired cache doesn't clear entries,
-        // it just refuses to serve them
 
         // Attempt to get config - should return None since cache is expired
         // and we can't reload from EC2 (no permissions) or S3 (not configured)

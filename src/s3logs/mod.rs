@@ -6,6 +6,7 @@ use tokio::task::JoinSet;
 use tracing::{debug, error};
 
 use crate::aws_attributes::AwsAttributes;
+use crate::flowlogs::FlowLogManager;
 
 mod json_blob;
 mod s3record;
@@ -32,21 +33,28 @@ impl Default for S3LogsConfig {
 }
 
 /// Parser for S3 event notifications that converts log files into OpenTelemetry ResourceLogs
-pub struct Parser {
+pub struct Parser<'a> {
     aws_attributes: AwsAttributes,
     request_id: String,
     s3_client: S3Client,
     config: S3LogsConfig,
+    flow_log_manager: &'a mut FlowLogManager,
 }
 
-impl Parser {
-    pub fn new(aws_attributes: &AwsAttributes, request_id: &String, s3_client: &S3Client) -> Self {
+impl<'a> Parser<'a> {
+    pub fn new(
+        aws_attributes: &AwsAttributes,
+        request_id: &String,
+        s3_client: &S3Client,
+        flow_log_manager: &'a mut FlowLogManager,
+    ) -> Self {
         let config = Self::load_config();
         Self {
             aws_attributes: aws_attributes.clone(),
             request_id: request_id.clone(),
             s3_client: s3_client.clone(),
             config,
+            flow_log_manager,
         }
     }
 
@@ -72,11 +80,14 @@ impl Parser {
     /// completes. This enables the caller to pipeline downstream processing (batching, exporting)
     /// concurrently with ongoing S3 reads.
     ///
+    /// The flow log manager stored on `self` is queried per-record to detect VPC Flow Log files
+    /// delivered to S3 and enrich them with the corresponding flow log tags and format information.
+    ///
     /// Returns `Ok(())` once all S3 objects have been processed. Individual object errors are
     /// logged but do not abort processing of remaining objects. A send error (receiver dropped)
     /// causes an early return with `Err`.
     pub async fn parse(
-        &self,
+        &mut self,
         s3_event: S3Event,
         result_tx: mpsc::Sender<Vec<ResourceLogs>>,
     ) -> Result<(), ParserError> {
@@ -88,11 +99,28 @@ impl Parser {
 
         let mut total_resource_logs: usize = 0;
 
-        // Process records in parallel with controlled concurrency
+        // Process records in parallel with controlled concurrency.
+        //
+        // NOTE: FlowLogManager requires &mut self for its async cache look-ups, so we must
+        // resolve the per-record flow log config *before* spawning the task (which needs an
+        // owned, Send value). We look up the config here in the driver loop and pass the
+        // resolved Option<FlowLogConfig> into each task.
         let mut tasks: JoinSet<Result<Vec<ResourceLogs>, ParserError>> = JoinSet::new();
         let max_concurrent = self.config.max_parallel_objects;
 
         for (idx, record) in s3_event.records.into_iter().enumerate() {
+            // Resolve the bucket name early so we can query the flow log manager.
+            let bucket_name = record.s3.bucket.name.as_deref().unwrap_or("").to_string();
+
+            // Look up VPC flow log config for this bucket (if any) before spawning the task.
+            let flow_log_config = if !bucket_name.is_empty() {
+                self.flow_log_manager
+                    .get_config_by_bucket(&bucket_name)
+                    .await
+            } else {
+                None
+            };
+
             let s3_client = self.s3_client.clone();
             let aws_attributes = self.aws_attributes.clone();
             let request_id = self.request_id.clone();
@@ -132,6 +160,7 @@ impl Parser {
                 aws_attributes,
                 request_id,
                 batch_size,
+                flow_log_config,
             );
 
             tasks.spawn(async move { s3_record.process().await });
@@ -174,6 +203,7 @@ impl Parser {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ParserType {
     Json,
+    VpcLog,
     Unknown,
 }
 

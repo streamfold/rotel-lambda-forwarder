@@ -16,7 +16,7 @@ use opentelemetry_proto::tonic::{
 };
 use tracing::debug;
 
-use crate::flowlogs::{FlowLogConfig, ParsedFields};
+use crate::flowlogs::{FlowLogConfig, ParsedField, ParsedFields, get_field_type};
 use crate::parse::json::parse_json_to_map;
 use crate::parse::platform::LogPlatform;
 use crate::parse::record_parser::LogBuilder;
@@ -241,25 +241,23 @@ fn parse_log_lines(
 
     // If we have a VPC flow log configuration for this bucket, use it directly.
     // Otherwise detect format from the key and content.
-    let (log_platform, parser_type) =
-        if flow_log_config.is_some() && key_without_compression.contains("vpcflowlogs") {
-            debug!(
-                request_id = %request_id,
-                bucket = %bucket,
-                key = %key_without_compression,
-                "Using VPC flow log parser for S3 object"
-            );
-            (LogPlatform::VpcFlowLog, ParserType::VpcLog)
-        } else {
-            let (platform, pt) = detect_log_format(key, &lines);
-            debug!(
-                request_id = %request_id,
-                platform = ?platform,
-                parser_type = ?pt,
-                "Detected log format"
-            );
-            (platform, pt)
-        };
+    let (log_platform, parser_type) = if flow_log_config.is_some() {
+        debug!(
+            request_id = %request_id,
+            bucket = %bucket,
+            "Using VPC flow log parser for S3 object"
+        );
+        (LogPlatform::VpcFlowLog, ParserType::VpcLog)
+    } else {
+        let (platform, pt) = detect_log_format(key, &lines);
+        debug!(
+            request_id = %request_id,
+            platform = ?platform,
+            parser_type = ?pt,
+            "Detected log format"
+        );
+        (platform, pt)
+    };
 
     let now_nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -270,9 +268,47 @@ fn parse_log_lines(
     let flow_log_tags: HashMap<String, String> =
         flow_log_config.map(|c| c.tags.clone()).unwrap_or_default();
 
-    // Resolved parsed fields (for VPC log line parsing).
-    let flow_log_parsed_fields: Option<Arc<ParsedFields>> =
-        flow_log_config.and_then(|c| c.parsed_fields.clone());
+    // For VPC flow logs, split the first non-comment line off as the header and build
+    // ParsedFields directly from it. This takes precedence over any pre-parsed fields
+    // stored in the FlowLogConfig because the header in the file is authoritative for
+    // the exact columns present in this particular file.
+    //
+    // Example header: "version account-id interface-id srcaddr dstaddr ..."
+    let (flow_log_parsed_fields, data_lines): (Option<Arc<ParsedFields>>, &[&str]) =
+        if parser_type == ParserType::VpcLog {
+            // Skip any leading comment lines (start with '#'), then treat the first
+            // remaining line as the column header.
+            let first_data = lines.iter().position(|l| !l.trim().starts_with('#'));
+            match first_data {
+                Some(header_idx) => {
+                    let header = lines[header_idx];
+                    let fields: Vec<ParsedField> = header
+                        .split_whitespace()
+                        .map(|name| {
+                            let field_type = get_field_type(name);
+                            ParsedField::new(name.to_string(), field_type)
+                        })
+                        .collect();
+
+                    let field_count = fields.len();
+                    let parsed = Arc::new(ParsedFields::Success(fields));
+
+                    debug!(
+                        request_id = %request_id,
+                        field_count = field_count,
+                        "Parsed VPC flow log column header from S3 file"
+                    );
+
+                    (Some(parsed), &lines[header_idx + 1..])
+                }
+                None => {
+                    // File contains only comment lines or is empty.
+                    (None, &[])
+                }
+            }
+        } else {
+            (None, &lines)
+        };
 
     // Create base resource attributes
     let base_attributes =
@@ -286,18 +322,11 @@ fn parse_log_lines(
     let mut resource_logs_list = Vec::new();
     let mut current_batch = Vec::new();
 
-    // For VPC flow logs we skip the header line (starts with "version" or "#").
-    let lines_iter: Box<dyn Iterator<Item = &str>> = if parser_type == ParserType::VpcLog {
-        Box::new(lines.iter().copied().filter(|line| {
-            let t = line.trim();
-            // Skip comment/header lines that AWS sometimes prepends
-            !t.starts_with('#') && !t.starts_with("version ")
-        }))
-    } else {
-        Box::new(lines.iter().copied())
-    };
-
-    let lines_collected: Vec<&str> = lines_iter.collect();
+    let lines_collected: Vec<&str> = data_lines
+        .iter()
+        .copied()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
     let lines_count = lines_collected.len();
 
     for line in lines_collected {
@@ -907,27 +936,9 @@ mod tests {
 
     #[test]
     fn test_parse_log_lines_vpc_flow_logs_with_tags() {
-        use crate::flowlogs::{FlowLogConfig, ParsedField, ParsedFieldType, ParsedFields};
-        use std::sync::Arc;
+        use crate::flowlogs::FlowLogConfig;
 
         let log_format = "${version} ${account-id} ${interface-id} ${srcaddr} ${dstaddr} ${srcport} ${dstport} ${protocol} ${packets} ${bytes} ${start} ${end} ${action} ${log-status}";
-
-        let fields = vec![
-            ParsedField::new("version".to_string(), ParsedFieldType::Int32),
-            ParsedField::new("account-id".to_string(), ParsedFieldType::String),
-            ParsedField::new("interface-id".to_string(), ParsedFieldType::String),
-            ParsedField::new("srcaddr".to_string(), ParsedFieldType::String),
-            ParsedField::new("dstaddr".to_string(), ParsedFieldType::String),
-            ParsedField::new("srcport".to_string(), ParsedFieldType::Int32),
-            ParsedField::new("dstport".to_string(), ParsedFieldType::Int32),
-            ParsedField::new("protocol".to_string(), ParsedFieldType::Int32),
-            ParsedField::new("packets".to_string(), ParsedFieldType::Int64),
-            ParsedField::new("bytes".to_string(), ParsedFieldType::Int64),
-            ParsedField::new("start".to_string(), ParsedFieldType::Int64),
-            ParsedField::new("end".to_string(), ParsedFieldType::Int64),
-            ParsedField::new("action".to_string(), ParsedFieldType::String),
-            ParsedField::new("log-status".to_string(), ParsedFieldType::String),
-        ];
 
         let mut tags = HashMap::new();
         tags.insert("Environment".to_string(), "production".to_string());
@@ -937,10 +948,12 @@ mod tests {
             log_format: log_format.to_string(),
             flow_log_id: "fl-s3-test123".to_string(),
             tags,
-            parsed_fields: Some(Arc::new(ParsedFields::Success(fields))),
+            // No pre-parsed fields — the header line in the file is the source of truth.
+            parsed_fields: None,
         };
 
-        let vpc_data = "2 123456789012 eni-abc123 10.0.0.1 10.0.0.2 443 52000 6 10 840 1620000000 1620000060 ACCEPT OK\n\
+        let vpc_data = "version account-id interface-id srcaddr dstaddr srcport dstport protocol packets bytes start end action log-status\n\
+                        2 123456789012 eni-abc123 10.0.0.1 10.0.0.2 443 52000 6 10 840 1620000000 1620000060 ACCEPT OK\n\
                         2 123456789012 eni-abc123 10.0.0.2 10.0.0.1 52000 443 6 8 620 1620000060 1620000120 ACCEPT OK\n";
 
         let aws_attributes = make_aws_attributes();
@@ -1004,23 +1017,18 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_log_lines_vpc_skips_header_line() {
-        use crate::flowlogs::{FlowLogConfig, ParsedField, ParsedFieldType, ParsedFields};
-        use std::sync::Arc;
+    fn test_parse_log_lines_vpc_header_defines_columns() {
+        use crate::flowlogs::FlowLogConfig;
 
-        let fields = vec![
-            ParsedField::new("version".to_string(), ParsedFieldType::Int32),
-            ParsedField::new("account-id".to_string(), ParsedFieldType::String),
-        ];
-
+        // FlowLogConfig with no pre-parsed fields — the header line must be used instead.
         let flow_log_config = FlowLogConfig {
             log_format: "${version} ${account-id}".to_string(),
             flow_log_id: "fl-hdr-test".to_string(),
             tags: HashMap::new(),
-            parsed_fields: Some(Arc::new(ParsedFields::Success(fields))),
+            parsed_fields: None,
         };
 
-        // Include a "version account-id" style header line (no leading #)
+        // Header line followed by one data line.
         let data = "version account-id\n2 123456789012\n";
         let aws_attributes = make_aws_attributes();
         let event_time = Utc::now();
@@ -1038,8 +1046,49 @@ mod tests {
 
         assert!(result.is_ok());
         let resource_logs = result.unwrap();
-        // Only the data line should be parsed; the header line is skipped
+        // Only the data line should produce a record; the header line is consumed as column info.
         assert_eq!(resource_logs[0].scope_logs[0].log_records.len(), 1);
+
+        // Structured attributes should be populated from the header-derived fields.
+        let record = &resource_logs[0].scope_logs[0].log_records[0];
+        assert!(
+            record.attributes.iter().any(|kv| kv.key == "account-id"),
+            "account-id attribute should be present"
+        );
+    }
+
+    #[test]
+    fn test_parse_log_lines_vpc_header_with_comment_lines() {
+        use crate::flowlogs::FlowLogConfig;
+
+        let flow_log_config = FlowLogConfig {
+            log_format: "${version} ${account-id}".to_string(),
+            flow_log_id: "fl-comment-test".to_string(),
+            tags: HashMap::new(),
+            parsed_fields: None,
+        };
+
+        // Comment line before the header, then a data line.
+        let data = "# this is a comment\nversion account-id\n2 123456789012\n";
+        let aws_attributes = make_aws_attributes();
+        let event_time = Utc::now();
+
+        let result = parse_log_lines(
+            data.as_bytes(),
+            event_time,
+            "my-bucket",
+            "flow.log",
+            &aws_attributes,
+            "req-id",
+            1000,
+            Some(&flow_log_config),
+        );
+
+        assert!(result.is_ok());
+        let resource_logs = result.unwrap();
+        assert_eq!(resource_logs[0].scope_logs[0].log_records.len(), 1);
+        let record = &resource_logs[0].scope_logs[0].log_records[0];
+        assert!(record.attributes.iter().any(|kv| kv.key == "account-id"));
     }
 
     #[test]

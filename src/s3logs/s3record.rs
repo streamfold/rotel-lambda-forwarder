@@ -241,23 +241,25 @@ fn parse_log_lines(
 
     // If we have a VPC flow log configuration for this bucket, use it directly.
     // Otherwise detect format from the key and content.
-    let (log_platform, parser_type) = if flow_log_config.is_some() {
-        debug!(
-            request_id = %request_id,
-            bucket = %bucket,
-            "Using VPC flow log parser for S3 object"
-        );
-        (LogPlatform::VpcFlowLog, ParserType::VpcLog)
-    } else {
-        let (platform, pt) = detect_log_format(key, &lines);
-        debug!(
-            request_id = %request_id,
-            platform = ?platform,
-            parser_type = ?pt,
-            "Detected log format"
-        );
-        (platform, pt)
-    };
+    let (log_platform, parser_type) =
+        if flow_log_config.is_some() && key_without_compression.contains("vpcflowlogs") {
+            debug!(
+                request_id = %request_id,
+                bucket = %bucket,
+                key = %key_without_compression,
+                "Using VPC flow log parser for S3 object"
+            );
+            (LogPlatform::VpcFlowLog, ParserType::VpcLog)
+        } else {
+            let (platform, pt) = detect_log_format(key, &lines);
+            debug!(
+                request_id = %request_id,
+                platform = ?platform,
+                parser_type = ?pt,
+                "Detected log format"
+            );
+            (platform, pt)
+        };
 
     let now_nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

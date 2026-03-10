@@ -300,14 +300,13 @@ fn parse_log_lines(
     let mut resource_logs_list = Vec::new();
     let mut current_batch = Vec::new();
 
-    let lines_collected: Vec<&str> = data_lines
-        .iter()
-        .copied()
-        .filter(|l| !l.trim().is_empty())
-        .collect();
-    let lines_count = lines_collected.len();
+    let lines_count = data_lines.len();
+    for line in data_lines {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
 
-    for line in lines_collected {
         let log_record = parse_line(
             &builder,
             now_nanos,

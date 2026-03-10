@@ -86,6 +86,44 @@ impl<'a> Parser<'a> {
     /// Returns `Ok(())` once all S3 objects have been processed. Individual object errors are
     /// logged but do not abort processing of remaining objects. A send error (receiver dropped)
     /// causes an early return with `Err`.
+    /// Process one completed task from `tasks`, forwarding any logs to `result_tx` and
+    /// accumulating the count into `total`. Returns `Ok(true)` if a task was processed,
+    /// `Ok(false)` if the set was empty, and `Err` if processing should abort.
+    async fn drain_one_task(
+        tasks: &mut JoinSet<Result<Vec<ResourceLogs>, ParserError>>,
+        result_tx: &mpsc::Sender<Vec<ResourceLogs>>,
+        total: &mut usize,
+        request_id: &str,
+    ) -> Result<bool, ParserError> {
+        match tasks.join_next().await {
+            None => Ok(false),
+            Some(Ok(Ok(logs))) => {
+                *total += logs.len();
+                if result_tx.send(logs).await.is_err() {
+                    error!(
+                        request_id = %request_id,
+                        "Result receiver dropped; aborting S3 parse"
+                    );
+                    Err(ParserError::ParseError(
+                        "Result receiver dropped".to_string(),
+                    ))
+                } else {
+                    Ok(true)
+                }
+            }
+            Some(Ok(Err(e))) => {
+                error!(error = %e, "Failed to process S3 object");
+                Err(e)
+            }
+            Some(Err(e)) => {
+                error!(error = %e, "Task panicked while processing S3 object");
+                Err(ParserError::ParseError(
+                    "Task panicked while processing S3 object".to_string(),
+                ))
+            }
+        }
+    }
+
     pub async fn parse(
         &mut self,
         s3_event: S3Event,
@@ -110,16 +148,20 @@ impl<'a> Parser<'a> {
 
         for (idx, record) in s3_event.records.into_iter().enumerate() {
             // Resolve the bucket name early so we can query the flow log manager.
-            let bucket_name = record.s3.bucket.name.as_deref().unwrap_or("").to_string();
-
-            // Look up VPC flow log config for this bucket (if any) before spawning the task.
-            let flow_log_config = if !bucket_name.is_empty() {
-                self.flow_log_manager
-                    .get_config_by_bucket(&bucket_name)
-                    .await
-            } else {
-                None
+            let bucket_name = match record.s3.bucket.name.as_deref() {
+                Some(b) => b.to_string(),
+                None => {
+                    return Err(ParserError::ParseError(
+                        "Invalid S3 record - no bucket name".to_string(),
+                    ));
+                }
             };
+
+            // Look up VPC flow log config for this bucket before spawning the task.
+            let flow_log_config = self
+                .flow_log_manager
+                .get_config_by_bucket(&bucket_name)
+                .await;
 
             let s3_client = self.s3_client.clone();
             let aws_attributes = self.aws_attributes.clone();
@@ -129,27 +171,15 @@ impl<'a> Parser<'a> {
             // Wait for the first task to finish if we've hit the concurrency limit, then
             // stream its results immediately rather than accumulating them.
             while tasks.len() >= max_concurrent {
-                match tasks.join_next().await {
-                    Some(Ok(Ok(logs))) => {
-                        total_resource_logs += logs.len();
-                        if result_tx.send(logs).await.is_err() {
-                            // Receiver was dropped; the caller has given up — stop processing.
-                            error!(
-                                request_id = %self.request_id,
-                                "Result receiver dropped; aborting S3 parse"
-                            );
-                            return Err(ParserError::ParseError(
-                                "Result receiver dropped".to_string(),
-                            ));
-                        }
-                    }
-                    Some(Ok(Err(e))) => {
-                        error!(error = %e, "Failed to process S3 object");
-                    }
-                    Some(Err(e)) => {
-                        error!(error = %e, "Task panicked while processing S3 object");
-                    }
-                    None => break,
+                if !Self::drain_one_task(
+                    &mut tasks,
+                    &result_tx,
+                    &mut total_resource_logs,
+                    &self.request_id,
+                )
+                .await?
+                {
+                    break;
                 }
             }
 
@@ -167,28 +197,14 @@ impl<'a> Parser<'a> {
         }
 
         // Drain remaining tasks, streaming each result as it completes.
-        while let Some(result) = tasks.join_next().await {
-            match result {
-                Ok(Ok(logs)) => {
-                    total_resource_logs += logs.len();
-                    if result_tx.send(logs).await.is_err() {
-                        error!(
-                            request_id = %self.request_id,
-                            "Result receiver dropped; aborting S3 parse"
-                        );
-                        return Err(ParserError::ParseError(
-                            "Result receiver dropped".to_string(),
-                        ));
-                    }
-                }
-                Ok(Err(e)) => {
-                    error!(error = %e, "Failed to process S3 object");
-                }
-                Err(e) => {
-                    error!(error = %e, "Task panicked while processing S3 object");
-                }
-            }
-        }
+        while Self::drain_one_task(
+            &mut tasks,
+            &result_tx,
+            &mut total_resource_logs,
+            &self.request_id,
+        )
+        .await?
+        {}
 
         debug!(
             request_id = %self.request_id,

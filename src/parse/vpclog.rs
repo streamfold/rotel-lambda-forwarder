@@ -13,8 +13,27 @@ use std::sync::Arc;
 
 use serde_json::Value as JsonValue;
 
-use crate::flowlogs::{ParsedFieldType, ParsedFields};
+use crate::flowlogs::{ParsedField, ParsedFieldType, ParsedFields, get_field_type};
 use crate::parse::{platform::ParserError, record_parser::RecordParserError};
+
+/// Parse a VPC flow log header line into a list of typed fields.
+///
+/// The header is the first line of an S3-delivered VPC flow log file and contains
+/// space-separated field names, e.g.:
+///
+/// ```text
+/// version account-id interface-id srcaddr dstaddr srcport dstport protocol packets bytes start end action log-status
+/// ```
+///
+/// Each name is looked up in the field-type map so that numeric fields are given the
+/// correct `Int32` / `Int64` type, matching the behaviour of `parse_log_format` for
+/// CloudWatch-delivered flow logs.
+pub(crate) fn parse_vpclog_header(header: &str) -> Vec<ParsedField> {
+    header
+        .split_whitespace()
+        .map(|name| ParsedField::new(name.to_string(), get_field_type(name)))
+        .collect()
+}
 
 /// Parse an EC2 Flow Log record from a string using pre-parsed field names
 /// Fields with value "-" are excluded from the result
@@ -92,10 +111,67 @@ mod tests {
     use super::*;
     use crate::cwlogs::ParserType;
     use crate::cwlogs::record_parser::RecordParser;
-    use crate::flowlogs::parse_log_format;
+    use crate::flowlogs::{ParsedFieldType, parse_log_format};
     use crate::parse::platform::LogPlatform;
     use aws_lambda_events::cloudwatch_logs::LogEntry;
     use opentelemetry_proto::tonic::{common::v1::any_value::Value, logs::v1::LogRecord};
+
+    #[test]
+    fn test_parse_vpclog_header_types() {
+        let header = "version account-id interface-id srcaddr dstaddr srcport dstport protocol packets bytes start end action log-status";
+        let fields = parse_vpclog_header(header);
+
+        assert_eq!(fields.len(), 14);
+
+        // Spot-check names
+        assert_eq!(fields[0].field_name, "version");
+        assert_eq!(fields[1].field_name, "account-id");
+        assert_eq!(fields[13].field_name, "log-status");
+
+        // Numeric types
+        assert_eq!(fields[0].field_type, ParsedFieldType::Int32); // version
+        assert_eq!(fields[5].field_type, ParsedFieldType::Int32); // srcport
+        assert_eq!(fields[6].field_type, ParsedFieldType::Int32); // dstport
+        assert_eq!(fields[7].field_type, ParsedFieldType::Int32); // protocol
+        assert_eq!(fields[8].field_type, ParsedFieldType::Int64); // packets
+        assert_eq!(fields[9].field_type, ParsedFieldType::Int64); // bytes
+        assert_eq!(fields[10].field_type, ParsedFieldType::Int64); // start
+        assert_eq!(fields[11].field_type, ParsedFieldType::Int64); // end
+
+        // String types
+        assert_eq!(fields[1].field_type, ParsedFieldType::String); // account-id
+        assert_eq!(fields[2].field_type, ParsedFieldType::String); // interface-id
+        assert_eq!(fields[3].field_type, ParsedFieldType::String); // srcaddr
+        assert_eq!(fields[4].field_type, ParsedFieldType::String); // dstaddr
+        assert_eq!(fields[12].field_type, ParsedFieldType::String); // action
+        assert_eq!(fields[13].field_type, ParsedFieldType::String); // log-status
+    }
+
+    #[test]
+    fn test_parse_vpclog_header_matches_parse_log_format() {
+        // The header line and the ${field} format string must produce identical ParsedField lists.
+        let header = "version account-id interface-id srcaddr dstaddr srcport dstport protocol packets bytes start end action log-status";
+        let format = "${version} ${account-id} ${interface-id} ${srcaddr} ${dstaddr} ${srcport} ${dstport} ${protocol} ${packets} ${bytes} ${start} ${end} ${action} ${log-status}";
+
+        let from_header = parse_vpclog_header(header);
+        let from_format = parse_log_format(format);
+
+        assert_eq!(from_header, from_format);
+    }
+
+    #[test]
+    fn test_parse_vpclog_header_unknown_field_defaults_to_string() {
+        let fields = parse_vpclog_header("some-new-field another-new-field");
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].field_type, ParsedFieldType::String);
+        assert_eq!(fields[1].field_type, ParsedFieldType::String);
+    }
+
+    #[test]
+    fn test_parse_vpclog_header_empty() {
+        let fields = parse_vpclog_header("");
+        assert!(fields.is_empty());
+    }
 
     const DEFAULT_FORMAT: &'static str = "${version} ${account-id} ${interface-id} ${srcaddr} ${dstaddr} ${srcport} ${dstport} ${protocol} ${packets} ${bytes} ${start} ${end} ${action} ${log-status}";
 

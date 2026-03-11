@@ -268,7 +268,7 @@ fn parse_log_lines(
 
     // If we have a VPC flow log configuration for this bucket, use it directly.
     // Otherwise detect format from the key and content.
-    let (log_platform, parser_type) = if flow_log_config.is_some() {
+    let (log_platform, parser_type) = if flow_log_config.is_some() && key.contains("vpcflowlogs") {
         debug!(
             request_id = %request_id,
             bucket = %bucket,

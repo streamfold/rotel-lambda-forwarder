@@ -215,9 +215,11 @@ impl Ec2FlowLogFetcher {
 /// prefix path is present in the ARN, or `Some(prefix)` otherwise.
 /// Returns `None` if the ARN does not have the expected structure.
 pub(crate) fn extract_bucket_and_prefix_from_arn(arn: &str) -> Option<(String, Option<String>)> {
-    // Expected format: arn:aws:s3:::bucket-name[/prefix]
-    // Split on ":::" and take everything after it.
-    let resource = arn.splitn(2, ":::").nth(1)?;
+    // ARN format: arn:partition:s3:region:account-id:resource
+    // For S3, region and account-id may be empty (e.g. "arn:aws:s3:::bucket-name")
+    // or populated (e.g. "arn:aws:s3:us-east-1:123456789012:bucket-name").
+    // We always split on ":" and take the 6th field (index 5) onward as the resource.
+    let resource = arn.splitn(6, ':').nth(5)?;
     if resource.is_empty() {
         return None;
     }
@@ -298,6 +300,27 @@ mod tests {
         assert_eq!(
             extract_bucket_and_prefix_from_arn(arn),
             Some(("my-bucket".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn test_extract_bucket_and_prefix_from_arn_with_region_and_account() {
+        let arn = "arn:aws:s3:us-east-1:123456789012:my-flow-logs-bucket";
+        assert_eq!(
+            extract_bucket_and_prefix_from_arn(arn),
+            Some(("my-flow-logs-bucket".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn test_extract_bucket_and_prefix_from_arn_with_region_and_account_and_prefix() {
+        let arn = "arn:aws:s3:us-east-1:123456789012:my-flow-logs-bucket/vpc-flow-logs/";
+        assert_eq!(
+            extract_bucket_and_prefix_from_arn(arn),
+            Some((
+                "my-flow-logs-bucket".to_string(),
+                Some("vpc-flow-logs/".to_string())
+            ))
         );
     }
 

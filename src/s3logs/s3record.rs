@@ -6,6 +6,8 @@ use tracing::warn;
 
 use aws_lambda_events::s3::S3EventRecord;
 use aws_sdk_s3::Client as S3Client;
+use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::operation::get_object::GetObjectError;
 use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
 use opentelemetry_proto::tonic::{
@@ -147,7 +149,33 @@ async fn load_s3_object(
         .key(key)
         .send()
         .await
-        .map_err(|e| ParserError::S3Error(format!("Failed to get S3 object: {}", e)))?;
+        .map_err(|e| {
+            let detail = match &e {
+                SdkError::ServiceError(svc) => {
+                    let err = svc.err();
+                    let code = match err {
+                        GetObjectError::NoSuchKey(_) => "NoSuchKey",
+                        _ => err.meta().code().unwrap_or("Unknown"),
+                    };
+                    format!(
+                        "service error: code={}, message={}",
+                        code,
+                        err.meta().message().unwrap_or("(none)")
+                    )
+                }
+                SdkError::ConstructionFailure(_) => "construction failure".to_string(),
+                SdkError::TimeoutError(_) => "timeout".to_string(),
+                SdkError::DispatchFailure(_) => "dispatch failure".to_string(),
+                SdkError::ResponseError(re) => {
+                    format!("response error: http status={}", re.raw().status())
+                }
+                _ => format!("{}", e),
+            };
+            ParserError::S3Error(format!(
+                "Failed to get S3 object: bucket={}, key={}, {}",
+                bucket, key, detail
+            ))
+        })?;
 
     let body_bytes = response
         .body

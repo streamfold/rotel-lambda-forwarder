@@ -22,13 +22,14 @@ pub enum Ec2Error {
 ///
 /// Flow logs are partitioned by their delivery destination type:
 /// - `by_log_group`: keyed by CloudWatch log group name
-/// - `by_bucket`:    keyed by S3 bucket name (extracted from the `log-destination` ARN)
+/// - `by_bucket`:    keyed by S3 bucket name (extracted from the `log-destination` ARN).
+///                   Multiple flow logs may share a bucket, differentiated by folder prefix.
 #[derive(Debug, Default)]
 pub struct FetchedFlowLogs {
     /// CloudWatch-delivered flow logs: log_group_name → config
     pub by_log_group: HashMap<String, FlowLogConfig>,
-    /// S3-delivered flow logs: bucket_name → config
-    pub by_bucket: HashMap<String, FlowLogConfig>,
+    /// S3-delivered flow logs: bucket_name → list of configs (one per distinct folder prefix)
+    pub by_bucket: HashMap<String, Vec<FlowLogConfig>>,
 }
 
 /// Fetcher for EC2 Flow Log configurations from EC2 API
@@ -111,6 +112,7 @@ impl Ec2FlowLogFetcher {
                 log_format,
                 flow_log_id: flow_log_id.clone(),
                 tags,
+                folder_prefix: None, // set below for S3 destinations
                 parsed_fields: None,
             };
 
@@ -151,8 +153,10 @@ impl Ec2FlowLogFetcher {
                         }
                     };
 
-                    let bucket_name = match extract_bucket_from_arn(destination_arn) {
-                        Some(b) => b,
+                    let (bucket_name, folder_prefix) = match extract_bucket_and_prefix_from_arn(
+                        destination_arn,
+                    ) {
+                        Some(parts) => parts,
                         None => {
                             warn!(
                                 flow_log_id = %flow_log_id,
@@ -165,12 +169,21 @@ impl Ec2FlowLogFetcher {
 
                     debug!(
                         bucket = %bucket_name,
+                        folder_prefix = ?folder_prefix,
                         flow_log_id = %flow_log_id,
                         tag_count = config.tags.len(),
                         "Found S3 EC2 flow log configuration"
                     );
 
-                    fetched.by_bucket.insert(bucket_name, config);
+                    let s3_config = FlowLogConfig {
+                        folder_prefix,
+                        ..config
+                    };
+                    fetched
+                        .by_bucket
+                        .entry(bucket_name)
+                        .or_default()
+                        .push(s3_config);
                 }
 
                 other => {
@@ -183,9 +196,11 @@ impl Ec2FlowLogFetcher {
             }
         }
 
+        let s3_config_count: usize = fetched.by_bucket.values().map(|v| v.len()).sum();
         info!(
             cloudwatch_count = fetched.by_log_group.len(),
-            s3_count = fetched.by_bucket.len(),
+            s3_bucket_count = fetched.by_bucket.len(),
+            s3_config_count,
             "Fetched EC2 flow log configurations from EC2"
         );
 
@@ -193,23 +208,38 @@ impl Ec2FlowLogFetcher {
     }
 }
 
-/// Extract the bucket name from an S3 ARN of the form
+/// Extract the bucket name and optional folder prefix from an S3 ARN of the form
 /// `arn:aws:s3:::bucket-name` or `arn:aws:s3:::bucket-name/optional/prefix`.
 ///
+/// Returns `Some((bucket, folder_prefix))` where `folder_prefix` is `None` when no
+/// prefix path is present in the ARN, or `Some(prefix)` otherwise.
 /// Returns `None` if the ARN does not have the expected structure.
-pub(crate) fn extract_bucket_from_arn(arn: &str) -> Option<String> {
+pub(crate) fn extract_bucket_and_prefix_from_arn(arn: &str) -> Option<(String, Option<String>)> {
     // Expected format: arn:aws:s3:::bucket-name[/prefix]
-    // Split on ":::" and take everything after it, then strip any key prefix.
+    // Split on ":::" and take everything after it.
     let resource = arn.splitn(2, ":::").nth(1)?;
     if resource.is_empty() {
         return None;
     }
-    // The bucket name is the first path component
-    let bucket = resource.splitn(2, '/').next()?;
-    if bucket.is_empty() {
-        None
-    } else {
-        Some(bucket.to_string())
+    // The bucket name is the first path component; anything after the first '/' is the prefix.
+    match resource.splitn(2, '/').collect::<Vec<_>>().as_slice() {
+        [bucket] => {
+            if bucket.is_empty() {
+                None
+            } else {
+                Some((bucket.to_string(), None))
+            }
+        }
+        [bucket, prefix] => {
+            if bucket.is_empty() {
+                None
+            } else if prefix.is_empty() {
+                Some((bucket.to_string(), None))
+            } else {
+                Some((bucket.to_string(), Some(prefix.to_string())))
+            }
+        }
+        _ => None,
     }
 }
 
@@ -229,33 +259,52 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_bucket_from_arn_simple() {
+    fn test_extract_bucket_and_prefix_from_arn_simple() {
         let arn = "arn:aws:s3:::my-flow-logs-bucket";
         assert_eq!(
-            extract_bucket_from_arn(arn),
-            Some("my-flow-logs-bucket".to_string())
+            extract_bucket_and_prefix_from_arn(arn),
+            Some(("my-flow-logs-bucket".to_string(), None))
         );
     }
 
     #[test]
-    fn test_extract_bucket_from_arn_with_prefix() {
+    fn test_extract_bucket_and_prefix_from_arn_with_prefix() {
         let arn = "arn:aws:s3:::my-flow-logs-bucket/vpc-flow-logs/";
         assert_eq!(
-            extract_bucket_from_arn(arn),
-            Some("my-flow-logs-bucket".to_string())
+            extract_bucket_and_prefix_from_arn(arn),
+            Some((
+                "my-flow-logs-bucket".to_string(),
+                Some("vpc-flow-logs/".to_string())
+            ))
         );
     }
 
     #[test]
-    fn test_extract_bucket_from_arn_with_deep_prefix() {
+    fn test_extract_bucket_and_prefix_from_arn_with_deep_prefix() {
         let arn = "arn:aws:s3:::my-bucket/AWSLogs/123456789012/vpcflowlogs/us-east-1/";
-        assert_eq!(extract_bucket_from_arn(arn), Some("my-bucket".to_string()));
+        assert_eq!(
+            extract_bucket_and_prefix_from_arn(arn),
+            Some((
+                "my-bucket".to_string(),
+                Some("AWSLogs/123456789012/vpcflowlogs/us-east-1/".to_string())
+            ))
+        );
     }
 
     #[test]
-    fn test_extract_bucket_from_arn_invalid() {
-        assert_eq!(extract_bucket_from_arn("not-an-arn"), None);
-        assert_eq!(extract_bucket_from_arn("arn:aws:s3:::"), None);
-        assert_eq!(extract_bucket_from_arn(""), None);
+    fn test_extract_bucket_and_prefix_from_arn_trailing_slash_only() {
+        // arn:aws:s3:::bucket/ — slash present but prefix is empty string
+        let arn = "arn:aws:s3:::my-bucket/";
+        assert_eq!(
+            extract_bucket_and_prefix_from_arn(arn),
+            Some(("my-bucket".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn test_extract_bucket_and_prefix_from_arn_invalid() {
+        assert_eq!(extract_bucket_and_prefix_from_arn("not-an-arn"), None);
+        assert_eq!(extract_bucket_and_prefix_from_arn("arn:aws:s3:::"), None);
+        assert_eq!(extract_bucket_and_prefix_from_arn(""), None);
     }
 }

@@ -914,6 +914,7 @@ mod tests {
             log_format: log_format.to_string(),
             flow_log_id: "fl-s3-test123".to_string(),
             tags,
+            folder_prefix: None,
             // No pre-parsed fields — the header line in the file is the source of truth.
             parsed_fields: None,
         };
@@ -991,6 +992,7 @@ mod tests {
             log_format: "${version} ${account-id}".to_string(),
             flow_log_id: "fl-hdr-test".to_string(),
             tags: HashMap::new(),
+            folder_prefix: None,
             parsed_fields: None,
         };
 

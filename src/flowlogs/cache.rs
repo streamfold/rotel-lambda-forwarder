@@ -83,6 +83,13 @@ pub struct FlowLogConfig {
     pub flow_log_id: String,
     pub tags: std::collections::HashMap<String, String>,
 
+    /// Optional S3 folder prefix from the flow log destination ARN
+    /// (e.g., "AWSLogs/123456789012/vpcflowlogs/us-east-1/" from
+    /// "arn:aws:s3:::my-bucket/AWSLogs/123456789012/vpcflowlogs/us-east-1/").
+    /// `None` for CloudWatch destinations or S3 destinations with no prefix.
+    #[serde(default)]
+    pub folder_prefix: Option<String>,
+
     /// Parsed field names from the log format (lazily computed, not serialized)
     #[serde(skip)]
     pub parsed_fields: Option<Arc<ParsedFields>>, // Use an Arc to reduce clone costs
@@ -92,7 +99,8 @@ pub struct FlowLogConfig {
 ///
 /// Two independent look-up maps are maintained:
 /// - `by_log_group`: CloudWatch Logs destinations, keyed by log group name.
-/// - `by_bucket`:    S3 destinations, keyed by bucket name.
+/// - `by_bucket`:    S3 destinations, keyed by bucket name. Each bucket may have
+///                   multiple flow log configurations with different folder prefixes.
 ///
 /// Both maps share a single TTL timestamp. The cache expires 30 minutes after it
 /// was last refreshed from the EC2 API — reading does not extend the TTL.
@@ -102,7 +110,7 @@ pub struct FlowLogConfig {
 #[derive(Debug, Clone)]
 pub struct FlowLogCache {
     by_log_group: HashMap<String, FlowLogConfig>,
-    by_bucket: HashMap<String, FlowLogConfig>,
+    by_bucket: HashMap<String, Vec<FlowLogConfig>>,
     /// Unix timestamp in seconds when the cache was last refreshed from EC2 API
     last_refreshed_secs: u64,
 }
@@ -150,36 +158,58 @@ impl FlowLogCache {
     }
 
     // -----------------------------------------------------------------------
-    // S3 look-ups (keyed by bucket name)
+    // S3 look-ups (keyed by bucket name + object key prefix)
     // -----------------------------------------------------------------------
 
-    /// Get a mutable reference to the flow log configuration for an S3 bucket.
-    /// Returns `None` if not found or the cache is expired.
+    /// Get a mutable reference to the flow log configuration for an S3 object.
     ///
-    /// Used for lazy initialisation of parsed fields.
-    pub fn get_mut_by_bucket(&mut self, bucket: &str) -> Option<&mut FlowLogConfig> {
+    /// Because multiple flow logs may share the same bucket (differentiated by a
+    /// folder prefix in their destination ARN), this method accepts the full S3
+    /// object key and returns the first `FlowLogConfig` whose `folder_prefix`
+    /// matches the start of that key.  A config with `folder_prefix: None` acts
+    /// as a catch-all and matches any key.
+    ///
+    /// Returns `None` if the cache is expired or no matching config is found.
+    pub fn get_mut_by_bucket(
+        &mut self,
+        bucket: &str,
+        object_key: &str,
+    ) -> Option<&mut FlowLogConfig> {
         if self.is_expired() {
             debug!("Cache expired");
             return None;
         }
 
-        if let Some(config) = self.by_bucket.get_mut(bucket) {
-            trace!(bucket = %bucket, "Cache hit mutable (by_bucket)");
-            Some(config)
+        if let Some(configs) = self.by_bucket.get_mut(bucket) {
+            let matched = configs.iter_mut().find(|c| match &c.folder_prefix {
+                Some(prefix) => object_key.starts_with(prefix.as_str()),
+                None => true,
+            });
+            if matched.is_some() {
+                trace!(bucket = %bucket, object_key = %object_key, "Cache hit mutable (by_bucket)");
+            } else {
+                trace!(bucket = %bucket, object_key = %object_key, "Cache miss (by_bucket) — no prefix match");
+            }
+            matched
         } else {
             trace!(bucket = %bucket, "Cache miss (by_bucket)");
             None
         }
     }
 
-    /// Insert or update an S3 flow log configuration.
+    /// Append an S3 flow log configuration for a bucket.
+    ///
+    /// Multiple configs can exist for the same bucket, each with a different
+    /// `folder_prefix`.  Configs are stored in insertion order; the first
+    /// matching prefix wins during lookup.
     pub fn insert_by_bucket(&mut self, bucket: String, config: FlowLogConfig) {
         debug!(
             bucket = %bucket,
             flow_log_id = %config.flow_log_id,
+            folder_prefix = ?config.folder_prefix,
             "Inserting flow log config into cache (by_bucket)"
         );
-        self.by_bucket.insert(bucket, config);
+        self.by_bucket.entry(bucket).or_default().push(config);
     }
 
     // -----------------------------------------------------------------------
@@ -245,8 +275,12 @@ impl FlowLogCache {
     }
 
     /// Total number of cached entries across both destination maps.
+    ///
+    /// For the bucket map, counts the total number of individual `FlowLogConfig`
+    /// entries (summed across all per-bucket `Vec`s), not the number of buckets.
     pub fn len(&self) -> usize {
-        self.by_log_group.len() + self.by_bucket.len()
+        let bucket_total: usize = self.by_bucket.values().map(|v| v.len()).sum();
+        self.by_log_group.len() + bucket_total
     }
 
     /// Returns `true` if both destination maps are empty.
@@ -269,9 +303,9 @@ pub struct CacheSnapshot {
     /// CloudWatch flow logs: log_group_name → config
     #[serde(default)]
     pub by_log_group: HashMap<String, FlowLogConfig>,
-    /// S3 flow logs: bucket_name → config
+    /// S3 flow logs: bucket_name → list of configs (one per distinct folder prefix)
     #[serde(default)]
-    pub by_bucket: HashMap<String, FlowLogConfig>,
+    pub by_bucket: HashMap<String, Vec<FlowLogConfig>>,
     /// Unix timestamp (seconds) when the cache was last refreshed
     pub last_refreshed_secs: u64,
 }
@@ -309,6 +343,7 @@ mod tests {
             log_format: "${version} ${account-id} ${interface-id}".to_string(),
             flow_log_id: "fl-1234567890abcdef0".to_string(),
             tags: HashMap::new(),
+            folder_prefix: None,
             parsed_fields: None,
         };
 
@@ -338,13 +373,14 @@ mod tests {
             log_format: "${version} ${account-id} ${interface-id}".to_string(),
             flow_log_id: "fl-s3-abc123".to_string(),
             tags: HashMap::new(),
+            folder_prefix: None,
             parsed_fields: None,
         };
 
         cache.insert_by_bucket("my-flow-logs-bucket".to_string(), config.clone());
         cache.mark_refreshed();
 
-        let retrieved = cache.get_mut_by_bucket("my-flow-logs-bucket");
+        let retrieved = cache.get_mut_by_bucket("my-flow-logs-bucket", "some/object/key.log.gz");
         assert!(retrieved.is_some());
         assert_eq!(*retrieved.unwrap(), config);
     }
@@ -352,8 +388,78 @@ mod tests {
     #[test]
     fn test_cache_miss_by_bucket() {
         let mut cache = FlowLogCache::new();
-        let retrieved = cache.get_mut_by_bucket("non-existent-bucket");
+        let retrieved = cache.get_mut_by_bucket("non-existent-bucket", "some/key.log.gz");
         assert!(retrieved.is_none());
+    }
+
+    #[test]
+    fn test_cache_bucket_prefix_matching() {
+        let mut cache = FlowLogCache::new();
+
+        let config_a = FlowLogConfig {
+            log_format: "${version} ${account-id}".to_string(),
+            flow_log_id: "fl-s3-prefix-a".to_string(),
+            tags: HashMap::new(),
+            folder_prefix: Some("AWSLogs/111111111111/vpcflowlogs/us-east-1/".to_string()),
+            parsed_fields: None,
+        };
+        let config_b = FlowLogConfig {
+            log_format: "${version} ${srcaddr}".to_string(),
+            flow_log_id: "fl-s3-prefix-b".to_string(),
+            tags: HashMap::new(),
+            folder_prefix: Some("AWSLogs/222222222222/vpcflowlogs/us-west-2/".to_string()),
+            parsed_fields: None,
+        };
+        let config_catchall = FlowLogConfig {
+            log_format: "${version} ${dstaddr}".to_string(),
+            flow_log_id: "fl-s3-catchall".to_string(),
+            tags: HashMap::new(),
+            folder_prefix: None,
+            parsed_fields: None,
+        };
+
+        cache.insert_by_bucket("shared-bucket".to_string(), config_a.clone());
+        cache.insert_by_bucket("shared-bucket".to_string(), config_b.clone());
+        cache.insert_by_bucket("shared-bucket".to_string(), config_catchall.clone());
+        cache.mark_refreshed();
+
+        // Key matching prefix A
+        let key_a = "AWSLogs/111111111111/vpcflowlogs/us-east-1/2024/01/01/flow.log.gz";
+        let result = cache.get_mut_by_bucket("shared-bucket", key_a);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().flow_log_id, "fl-s3-prefix-a");
+
+        // Key matching prefix B
+        let key_b = "AWSLogs/222222222222/vpcflowlogs/us-west-2/2024/01/01/flow.log.gz";
+        let result = cache.get_mut_by_bucket("shared-bucket", key_b);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().flow_log_id, "fl-s3-prefix-b");
+
+        // Key that matches neither prefix A nor B — falls through to the catch-all
+        let key_other = "custom/path/flow.log.gz";
+        let result = cache.get_mut_by_bucket("shared-bucket", key_other);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().flow_log_id, "fl-s3-catchall");
+    }
+
+    #[test]
+    fn test_cache_bucket_no_prefix_match_returns_none() {
+        let mut cache = FlowLogCache::new();
+
+        let config = FlowLogConfig {
+            log_format: "${version} ${account-id}".to_string(),
+            flow_log_id: "fl-s3-specific".to_string(),
+            tags: HashMap::new(),
+            folder_prefix: Some("AWSLogs/123456789012/vpcflowlogs/".to_string()),
+            parsed_fields: None,
+        };
+
+        cache.insert_by_bucket("my-bucket".to_string(), config);
+        cache.mark_refreshed();
+
+        // Object key does not start with the configured prefix → no match
+        let result = cache.get_mut_by_bucket("my-bucket", "other-prefix/2024/01/01/flow.log.gz");
+        assert!(result.is_none());
     }
 
     #[test]
@@ -364,6 +470,7 @@ mod tests {
             log_format: "${version} ${account-id}".to_string(),
             flow_log_id: "fl-xxx".to_string(),
             tags: HashMap::new(),
+            folder_prefix: None,
             parsed_fields: None,
         };
 
@@ -376,12 +483,33 @@ mod tests {
     }
 
     #[test]
+    fn test_cache_len_counts_multiple_configs_per_bucket() {
+        let mut cache = FlowLogCache::new();
+
+        let make_config = |id: &str, prefix: Option<&str>| FlowLogConfig {
+            log_format: "${version}".to_string(),
+            flow_log_id: id.to_string(),
+            tags: HashMap::new(),
+            folder_prefix: prefix.map(|s| s.to_string()),
+            parsed_fields: None,
+        };
+
+        cache.insert_by_bucket("bucket".to_string(), make_config("fl-1", Some("prefix-a/")));
+        cache.insert_by_bucket("bucket".to_string(), make_config("fl-2", Some("prefix-b/")));
+        cache.mark_refreshed();
+
+        // Two configs in one bucket → len should be 2
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
     fn test_cache_clear() {
         let mut cache = FlowLogCache::new();
         let config = FlowLogConfig {
             log_format: "${version}".to_string(),
             flow_log_id: "fl-yyy".to_string(),
             tags: HashMap::new(),
+            folder_prefix: None,
             parsed_fields: None,
         };
         cache.insert_by_log_group("group".to_string(), config.clone());
@@ -429,12 +557,14 @@ mod tests {
             log_format: "${version} ${account-id}".to_string(),
             flow_log_id: "fl-cw-111".to_string(),
             tags: HashMap::new(),
+            folder_prefix: None,
             parsed_fields: None,
         };
         let s3_config = FlowLogConfig {
             log_format: "${version} ${interface-id}".to_string(),
             flow_log_id: "fl-s3-222".to_string(),
             tags: HashMap::new(),
+            folder_prefix: Some("AWSLogs/".to_string()),
             parsed_fields: None,
         };
 
@@ -443,13 +573,17 @@ mod tests {
         cache.mark_refreshed();
 
         let snapshot = cache.get_snapshot();
+        // 1 CloudWatch bucket, 1 S3 bucket key (with 1 config inside)
         assert_eq!(snapshot.by_log_group.len(), 1);
         assert_eq!(snapshot.by_bucket.len(), 1);
         assert_eq!(
             snapshot.by_log_group.get("/aws/ec2/flowlogs").unwrap(),
             &cw_config
         );
-        assert_eq!(snapshot.by_bucket.get("my-bucket").unwrap(), &s3_config);
+        assert_eq!(
+            snapshot.by_bucket.get("my-bucket").unwrap(),
+            &vec![s3_config]
+        );
     }
 
     #[test]
@@ -460,12 +594,14 @@ mod tests {
             log_format: "${version} ${account-id}".to_string(),
             flow_log_id: "fl-cw-123".to_string(),
             tags: HashMap::new(),
+            folder_prefix: None,
             parsed_fields: None,
         };
         let s3_config = FlowLogConfig {
             log_format: "${version} ${srcaddr}".to_string(),
             flow_log_id: "fl-s3-456".to_string(),
             tags: HashMap::new(),
+            folder_prefix: Some("AWSLogs/".to_string()),
             parsed_fields: None,
         };
 
@@ -477,7 +613,7 @@ mod tests {
             },
             by_bucket: {
                 let mut m = HashMap::new();
-                m.insert("my-bucket".to_string(), s3_config.clone());
+                m.insert("my-bucket".to_string(), vec![s3_config.clone()]);
                 m
             },
             last_refreshed_secs: SystemTime::now()
@@ -492,7 +628,12 @@ mod tests {
             *cache.get_mut_by_log_group("/aws/ec2/flowlogs").unwrap(),
             cw_config
         );
-        assert_eq!(*cache.get_mut_by_bucket("my-bucket").unwrap(), s3_config);
+        assert_eq!(
+            *cache
+                .get_mut_by_bucket("my-bucket", "AWSLogs/2024/01/01/flow.log.gz")
+                .unwrap(),
+            s3_config
+        );
     }
 
     #[test]
@@ -503,6 +644,7 @@ mod tests {
             log_format: "${version}".to_string(),
             flow_log_id: "fl-old".to_string(),
             tags: HashMap::new(),
+            folder_prefix: None,
             parsed_fields: None,
         };
 
@@ -544,6 +686,7 @@ mod tests {
             log_format: "${version} ${account-id} ${interface-id}".to_string(),
             flow_log_id: "fl-1234567890abcdef0".to_string(),
             tags: tags.clone(),
+            folder_prefix: None,
             parsed_fields: None,
         };
 
@@ -604,6 +747,7 @@ mod tests {
             log_format: "${version} ${account-id}".to_string(),
             flow_log_id: "fl-123".to_string(),
             tags: HashMap::new(),
+            folder_prefix: None,
             parsed_fields: Some(Arc::new(ParsedFields::Success(vec![
                 ParsedField::new("version".to_string(), ParsedFieldType::Int32),
                 ParsedField::new("account-id".to_string(), ParsedFieldType::String),
@@ -636,6 +780,7 @@ mod tests {
             log_format: "invalid format".to_string(),
             flow_log_id: "fl-123".to_string(),
             tags: HashMap::new(),
+            folder_prefix: None,
             parsed_fields: Some(Arc::new(ParsedFields::Error("Parse failed".to_string()))),
         };
 

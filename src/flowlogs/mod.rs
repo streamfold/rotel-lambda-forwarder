@@ -9,7 +9,7 @@
 //!
 //! Flow logs are indexed by destination type:
 //! - CloudWatch Logs destinations: looked up by log group name via `get_config`
-//! - S3 destinations: looked up by bucket name via `get_config_by_bucket`
+//! - S3 destinations: looked up by bucket name + object key via `get_config_by_bucket`
 //!
 
 mod cache;
@@ -74,7 +74,7 @@ impl FlowLogCacheFile {
 ///
 /// Two lookup methods are provided:
 /// - [`get_config`]: look up by CloudWatch log group name (CloudWatch Logs destinations)
-/// - [`get_config_by_bucket`]: look up by S3 bucket name (S3 destinations)
+/// - [`get_config_by_bucket`]: look up by S3 bucket name + object key (S3 destinations)
 ///
 pub struct FlowLogManager {
     cache: FlowLogCache,
@@ -222,15 +222,21 @@ impl FlowLogManager {
         Some(config.clone())
     }
 
-    /// Get flow log configuration for an S3 bucket name.
+    /// Get flow log configuration for an S3 object.
     ///
-    /// Mirrors [`get_config`] but looks up by the S3 bucket name rather than a
-    /// CloudWatch log group name. This is used when processing VPC flow log files
+    /// Mirrors [`get_config`] but looks up by S3 bucket name + object key rather than a
+    /// CloudWatch log group name. Because multiple flow logs may target the same bucket
+    /// (differentiated by a folder prefix), the full object key is required to select
+    /// the correct configuration. This is used when processing VPC flow log files
     /// delivered to S3.
-    pub async fn get_config_by_bucket(&mut self, bucket_name: &str) -> Option<FlowLogConfig> {
+    pub async fn get_config_by_bucket(
+        &mut self,
+        bucket_name: &str,
+        object_key: &str,
+    ) -> Option<FlowLogConfig> {
         self.ensure_cache_fresh(bucket_name, "bucket").await?;
 
-        let config = self.cache.get_mut_by_bucket(bucket_name)?;
+        let config = self.cache.get_mut_by_bucket(bucket_name, object_key)?;
         Self::ensure_parsed_fields(config, bucket_name, "bucket");
         Some(config.clone())
     }
@@ -312,8 +318,10 @@ impl FlowLogManager {
         }
 
         // Update S3 cache entries
-        for (bucket, config) in fetched.by_bucket {
-            self.cache.insert_by_bucket(bucket, config);
+        for (bucket, configs) in fetched.by_bucket {
+            for config in configs {
+                self.cache.insert_by_bucket(bucket.clone(), config);
+            }
         }
 
         // Mark the cache as refreshed
@@ -516,6 +524,7 @@ mod tests {
                 log_format: "${version} ${account-id}".to_string(),
                 flow_log_id: "fl-test123".to_string(),
                 tags: HashMap::new(),
+                folder_prefix: None,
                 parsed_fields: None,
             },
         );
@@ -552,12 +561,13 @@ mod tests {
         let mut by_bucket = HashMap::new();
         by_bucket.insert(
             "my-flow-logs-bucket".to_string(),
-            FlowLogConfig {
+            vec![FlowLogConfig {
                 log_format: "${version} ${account-id} ${srcaddr}".to_string(),
                 flow_log_id: "fl-s3-abc456".to_string(),
                 tags: HashMap::new(),
+                folder_prefix: None,
                 parsed_fields: None,
-            },
+            }],
         );
 
         let snapshot = CacheSnapshot {
@@ -574,7 +584,9 @@ mod tests {
         assert!(!manager.cache.is_expired());
         assert_eq!(manager.cache.len(), 1);
 
-        let config = manager.get_config_by_bucket("my-flow-logs-bucket").await;
+        let config = manager
+            .get_config_by_bucket("my-flow-logs-bucket", "AWSLogs/2024/01/01/flow.log.gz")
+            .await;
         assert!(config.is_some());
         let config = config.unwrap();
         assert_eq!(config.flow_log_id, "fl-s3-abc456");
@@ -602,7 +614,9 @@ mod tests {
         };
         manager.cache.load_snapshot(snapshot);
 
-        let result = manager.get_config_by_bucket("non-existent-bucket").await;
+        let result = manager
+            .get_config_by_bucket("non-existent-bucket", "some/key.log.gz")
+            .await;
         assert!(result.is_none());
     }
 
@@ -661,6 +675,7 @@ mod tests {
                 log_format: "${version} ${account-id}".to_string(),
                 flow_log_id: "fl-expired123".to_string(),
                 tags: HashMap::new(),
+                folder_prefix: None,
                 parsed_fields: None,
             },
         );

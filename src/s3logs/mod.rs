@@ -147,7 +147,7 @@ impl<'a> Parser<'a> {
         let max_concurrent = self.config.max_parallel_objects;
 
         for (idx, record) in s3_event.records.into_iter().enumerate() {
-            // Resolve the bucket name early so we can query the flow log manager.
+            // Resolve the bucket name and object key early so we can query the flow log manager.
             let bucket_name = match record.s3.bucket.name.as_deref() {
                 Some(b) => b.to_string(),
                 None => {
@@ -156,11 +156,21 @@ impl<'a> Parser<'a> {
                     ));
                 }
             };
+            let object_key = match record.s3.object.key.as_deref() {
+                Some(k) => k.to_string(),
+                None => {
+                    return Err(ParserError::ParseError(
+                        "Invalid S3 record - no object key".to_string(),
+                    ));
+                }
+            };
 
-            // Look up VPC flow log config for this bucket before spawning the task.
+            // Look up VPC flow log config for this bucket + object key before spawning the task.
+            // Multiple flow logs may share the same bucket with different folder prefixes, so
+            // both pieces of information are needed to find the correct configuration.
             let flow_log_config = self
                 .flow_log_manager
-                .get_config_by_bucket(&bucket_name)
+                .get_config_by_bucket(&bucket_name, &object_key)
                 .await;
 
             let s3_client = self.s3_client.clone();

@@ -1033,7 +1033,7 @@ mod tests {
             data.as_bytes(),
             event_time,
             "my-bucket",
-            "flow.log",
+            "AWSLogs/123456789012/vpcflowlogs/us-east-1/2024/01/01/flow.log",
             &aws_attributes,
             "req-id",
             1000,

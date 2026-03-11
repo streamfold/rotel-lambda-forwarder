@@ -96,12 +96,12 @@ impl RecordParser {
     /// should do next — no mutation of external state as a side-effect.
     fn parse_message(&self, message: String) -> ParsedMessage {
         match self.parser_type {
-            ParserType::Json => match parse_json_to_map(message) {
+            ParserType::Json => match parse_json_to_map(&message) {
                 Ok(map) => ParsedMessage::Map(map),
                 Err(e) => ParsedMessage::Error(e),
             },
 
-            ParserType::KeyValue => match parse_keyvalue_to_map(message) {
+            ParserType::KeyValue => match parse_keyvalue_to_map(&message) {
                 Ok(map) => ParsedMessage::Map(map),
                 Err(e) => ParsedMessage::Error(e),
             },
@@ -126,7 +126,7 @@ impl RecordParser {
                 // Auto-detect: attempt JSON for messages that look like objects;
                 // otherwise treat as opaque plain text.
                 if message.len() > 2 && message.starts_with('{') {
-                    match parse_json_to_map(message) {
+                    match parse_json_to_map(&message) {
                         Ok(map) => ParsedMessage::Map(map),
                         Err(e) => ParsedMessage::Error(e),
                     }

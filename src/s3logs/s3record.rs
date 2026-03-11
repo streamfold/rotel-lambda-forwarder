@@ -379,7 +379,7 @@ fn parse_line(
         }
 
         ParserType::Json => {
-            match parse_json_to_map(line.to_string()) {
+            match parse_json_to_map(line) {
                 Ok(map) => {
                     record_builder.populate_from_map(map);
                 }
@@ -393,7 +393,7 @@ fn parse_line(
 
         ParserType::Unknown => {
             if line.len() > 2 && line.starts_with('{') {
-                match parse_json_to_map(line.to_string()) {
+                match parse_json_to_map(line) {
                     Ok(map) => {
                         record_builder.populate_from_map(map);
                     }

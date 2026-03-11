@@ -14,14 +14,14 @@ use crate::parse::{platform::ParserError, record_parser::RecordParserError};
 /// All values are stored as JsonValue::String
 /// Returns an error if no valid key-value pairs are found
 pub(crate) fn parse_keyvalue_to_map(
-    input: String,
+    input: &str,
 ) -> Result<serde_json::Map<String, JsonValue>, RecordParserError> {
-    let pairs = parse_keyvalue_pairs(&input);
+    let pairs = parse_keyvalue_pairs(input);
 
     if pairs.is_empty() {
         return Err(RecordParserError(
             ParserError::FormatParseError("No valid key-value pairs found".to_string()),
-            input,
+            input.to_string(),
         ));
     }
 

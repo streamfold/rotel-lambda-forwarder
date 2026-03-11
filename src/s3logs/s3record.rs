@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
 
-use serde_json::Value as JsonValue;
 use tracing::warn;
 
 use aws_lambda_events::s3::S3EventRecord;
@@ -367,7 +366,7 @@ fn parse_line(
             // When parsed fields are available, also emit individual fields as attributes.
             record_builder = record_builder.set_body_text(line.to_string());
             if let Some(parsed_fields) = flow_log_parsed_fields {
-                match parse_vpclog_to_map(line.to_string(), parsed_fields) {
+                match parse_vpclog_to_map(line, parsed_fields) {
                     Ok(map) => {
                         record_builder.populate_from_map(map);
                     }

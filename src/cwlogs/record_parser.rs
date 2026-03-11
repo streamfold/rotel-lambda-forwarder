@@ -112,7 +112,7 @@ impl RecordParser {
                 // individual flow-log fields are emitted as attributes.
                 match self.flow_log_parsed_fields.as_ref() {
                     Some(parsed_fields) => {
-                        match parse_vpclog_to_map(message.clone(), parsed_fields.clone()) {
+                        match parse_vpclog_to_map(&message, parsed_fields.clone()) {
                             Ok(map) => ParsedMessage::PlainText(message, Some(map)),
                             Err(e) => ParsedMessage::Error(e),
                         }

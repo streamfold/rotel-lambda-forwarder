@@ -311,7 +311,7 @@ fn parse_log_lines(
             &builder,
             now_nanos,
             event_timestamp,
-            line.to_string(),
+            line,
             parser_type,
             flow_log_parsed_fields.clone(),
         );
@@ -355,7 +355,7 @@ fn parse_line(
     builder: &LogBuilder,
     now_nanos: u64,
     timestamp_ms: i64,
-    line: String,
+    line: &str,
     parser_type: ParserType,
     flow_log_parsed_fields: Option<Arc<ParsedFields>>,
 ) -> opentelemetry_proto::tonic::logs::v1::LogRecord {
@@ -365,9 +365,9 @@ fn parse_line(
         ParserType::VpcLog => {
             // VPC Flow Logs always preserve the raw line as the body.
             // When parsed fields are available, also emit individual fields as attributes.
-            record_builder = record_builder.set_body_text(line.clone());
+            record_builder = record_builder.set_body_text(line.to_string());
             if let Some(parsed_fields) = flow_log_parsed_fields {
-                match parse_vpclog_to_map(line, parsed_fields) {
+                match parse_vpclog_to_map(line.to_string(), parsed_fields) {
                     Ok(map) => {
                         record_builder.populate_from_map(map);
                     }
@@ -380,16 +380,13 @@ fn parse_line(
         }
 
         ParserType::Json => {
-            let map_result: Result<serde_json::Map<String, JsonValue>, _> =
-                parse_json_to_map(line.clone()).map_err(|e| (e, line.clone()));
-
-            match map_result {
+            match parse_json_to_map(line.to_string()) {
                 Ok(map) => {
                     record_builder.populate_from_map(map);
                 }
-                Err((err, raw)) => {
+                Err(err) => {
                     warn!(error = ?err, "Failed to parse log line as JSON, using raw text as body");
-                    return record_builder.set_body_text(raw).finish();
+                    return record_builder.set_body_text(line.to_string()).finish();
                 }
             }
             record_builder.finish()
@@ -397,18 +394,18 @@ fn parse_line(
 
         ParserType::Unknown => {
             if line.len() > 2 && line.starts_with('{') {
-                match parse_json_to_map(line.clone()) {
+                match parse_json_to_map(line.to_string()) {
                     Ok(map) => {
                         record_builder.populate_from_map(map);
                     }
                     Err(err) => {
                         warn!(error = ?err, "Failed to parse log line, using raw text as body");
-                        return record_builder.set_body_text(line).finish();
+                        return record_builder.set_body_text(line.to_string()).finish();
                     }
                 }
                 record_builder.finish()
             } else {
-                record_builder.set_body_text(line).finish()
+                record_builder.set_body_text(line.to_string()).finish()
             }
         }
     }
@@ -782,7 +779,7 @@ mod tests {
             &builder,
             123_456_789,
             1_000,
-            r#"{"level":"info","msg":"hello"}"#.to_string(),
+            r#"{"level":"info","msg":"hello"}"#,
             ParserType::Json,
             None,
         );
@@ -796,7 +793,7 @@ mod tests {
             &builder,
             123_456_789,
             1_000,
-            r#"{"level":"info","msg":"hello"}"#.to_string(),
+            r#"{"level":"info","msg":"hello"}"#,
             ParserType::Unknown,
             None,
         );
@@ -812,7 +809,7 @@ mod tests {
             &builder,
             123_456_789,
             1_000,
-            "plain text log line".to_string(),
+            "plain text log line",
             ParserType::Unknown,
             None,
         );
@@ -833,14 +830,7 @@ mod tests {
 
         let builder = LogBuilder::new(LogPlatform::Unknown);
         let raw = r#"{"broken json"#.to_string();
-        let lr = parse_line(
-            &builder,
-            123_456_789,
-            1_000,
-            raw.clone(),
-            ParserType::Json,
-            None,
-        );
+        let lr = parse_line(&builder, 123_456_789, 1_000, &raw, ParserType::Json, None);
         if let Some(body) = &lr.body {
             if let Some(Value::StringValue(s)) = &body.value {
                 assert_eq!(s, &raw);
@@ -889,7 +879,7 @@ mod tests {
             &builder,
             123_456_789,
             1_000,
-            line.clone(),
+            &line,
             ParserType::VpcLog,
             Some(parsed_fields),
         );

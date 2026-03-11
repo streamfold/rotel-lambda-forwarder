@@ -120,23 +120,6 @@ impl FlowLogCache {
     // CloudWatch look-ups (keyed by log group name)
     // -----------------------------------------------------------------------
 
-    /// Get flow log configuration for a CloudWatch log group.
-    /// Returns `None` if not found or the cache is expired.
-    pub fn get_by_log_group(&self, log_group: &str) -> Option<FlowLogConfig> {
-        if self.is_expired() {
-            debug!("Cache expired");
-            return None;
-        }
-
-        if let Some(config) = self.by_log_group.get(log_group) {
-            trace!(log_group = %log_group, "Cache hit (by_log_group)");
-            Some(config.clone())
-        } else {
-            trace!(log_group = %log_group, "Cache miss (by_log_group)");
-            None
-        }
-    }
-
     /// Get a mutable reference to the flow log configuration for a CloudWatch log group.
     /// Returns `None` if not found or the cache is expired.
     ///
@@ -169,23 +152,6 @@ impl FlowLogCache {
     // -----------------------------------------------------------------------
     // S3 look-ups (keyed by bucket name)
     // -----------------------------------------------------------------------
-
-    /// Get flow log configuration for an S3 bucket.
-    /// Returns `None` if not found or the cache is expired.
-    pub fn get_by_bucket(&self, bucket: &str) -> Option<FlowLogConfig> {
-        if self.is_expired() {
-            debug!("Cache expired");
-            return None;
-        }
-
-        if let Some(config) = self.by_bucket.get(bucket) {
-            trace!(bucket = %bucket, "Cache hit (by_bucket)");
-            Some(config.clone())
-        } else {
-            trace!(bucket = %bucket, "Cache miss (by_bucket)");
-            None
-        }
-    }
 
     /// Get a mutable reference to the flow log configuration for an S3 bucket.
     /// Returns `None` if not found or the cache is expired.
@@ -349,15 +315,15 @@ mod tests {
         cache.insert_by_log_group("/aws/ec2/flowlogs".to_string(), config.clone());
         cache.mark_refreshed();
 
-        let retrieved = cache.get_by_log_group("/aws/ec2/flowlogs");
+        let retrieved = cache.get_mut_by_log_group("/aws/ec2/flowlogs");
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap(), config);
+        assert_eq!(*retrieved.unwrap(), config);
     }
 
     #[test]
     fn test_cache_miss_by_log_group() {
-        let cache = FlowLogCache::new();
-        let retrieved = cache.get_by_log_group("non-existent");
+        let mut cache = FlowLogCache::new();
+        let retrieved = cache.get_mut_by_log_group("non-existent");
         assert!(retrieved.is_none());
     }
 
@@ -378,15 +344,15 @@ mod tests {
         cache.insert_by_bucket("my-flow-logs-bucket".to_string(), config.clone());
         cache.mark_refreshed();
 
-        let retrieved = cache.get_by_bucket("my-flow-logs-bucket");
+        let retrieved = cache.get_mut_by_bucket("my-flow-logs-bucket");
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap(), config);
+        assert_eq!(*retrieved.unwrap(), config);
     }
 
     #[test]
     fn test_cache_miss_by_bucket() {
-        let cache = FlowLogCache::new();
-        let retrieved = cache.get_by_bucket("non-existent-bucket");
+        let mut cache = FlowLogCache::new();
+        let retrieved = cache.get_mut_by_bucket("non-existent-bucket");
         assert!(retrieved.is_none());
     }
 
@@ -523,10 +489,10 @@ mod tests {
         cache.load_snapshot(snapshot);
 
         assert_eq!(
-            cache.get_by_log_group("/aws/ec2/flowlogs").unwrap(),
+            *cache.get_mut_by_log_group("/aws/ec2/flowlogs").unwrap(),
             cw_config
         );
-        assert_eq!(cache.get_by_bucket("my-bucket").unwrap(), s3_config);
+        assert_eq!(*cache.get_mut_by_bucket("my-bucket").unwrap(), s3_config);
     }
 
     #[test]
@@ -584,7 +550,7 @@ mod tests {
         cache.insert_by_log_group("/aws/ec2/flowlogs".to_string(), config.clone());
         cache.mark_refreshed();
 
-        let retrieved = cache.get_by_log_group("/aws/ec2/flowlogs").unwrap();
+        let retrieved = cache.get_mut_by_log_group("/aws/ec2/flowlogs").unwrap();
         assert_eq!(retrieved.tags.len(), 3);
         assert_eq!(retrieved.tags.get("Environment").unwrap(), "production");
         assert_eq!(retrieved.tags.get("Team").unwrap(), "platform");
@@ -647,7 +613,7 @@ mod tests {
         cache.insert_by_log_group("/aws/ec2/flowlogs".to_string(), config.clone());
         cache.mark_refreshed();
 
-        let retrieved = cache.get_by_log_group("/aws/ec2/flowlogs").unwrap();
+        let retrieved = cache.get_mut_by_log_group("/aws/ec2/flowlogs").unwrap();
         assert!(retrieved.parsed_fields.is_some());
         if let Some(parsed_fields) = &retrieved.parsed_fields {
             if let ParsedFields::Success(fields) = parsed_fields.as_ref() {
@@ -676,7 +642,7 @@ mod tests {
         cache.insert_by_log_group("/aws/ec2/flowlogs".to_string(), config);
         cache.mark_refreshed();
 
-        let retrieved = cache.get_by_log_group("/aws/ec2/flowlogs").unwrap();
+        let retrieved = cache.get_mut_by_log_group("/aws/ec2/flowlogs").unwrap();
         if let Some(parsed_fields) = &retrieved.parsed_fields {
             if let ParsedFields::Error(msg) = parsed_fields.as_ref() {
                 assert_eq!(msg, "Parse failed");

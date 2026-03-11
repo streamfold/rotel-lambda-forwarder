@@ -33,20 +33,22 @@ impl Default for S3LogsConfig {
 }
 
 /// Parser for S3 event notifications that converts log files into OpenTelemetry ResourceLogs
-pub struct Parser<'a> {
+pub struct Parser {
     aws_attributes: AwsAttributes,
     request_id: String,
     s3_client: S3Client,
     config: S3LogsConfig,
-    flow_log_manager: &'a mut FlowLogManager,
+    /// Shared, cheaply-cloneable flow log manager.  No `&mut` needed — the manager
+    /// serialises access to its internal state with a `tokio::sync::Mutex`.
+    flow_log_manager: FlowLogManager,
 }
 
-impl<'a> Parser<'a> {
+impl Parser {
     pub fn new(
         aws_attributes: &AwsAttributes,
         request_id: &String,
         s3_client: &S3Client,
-        flow_log_manager: &'a mut FlowLogManager,
+        flow_log_manager: &FlowLogManager,
     ) -> Self {
         let config = Self::load_config();
         Self {
@@ -54,7 +56,7 @@ impl<'a> Parser<'a> {
             request_id: request_id.clone(),
             s3_client: s3_client.clone(),
             config,
-            flow_log_manager,
+            flow_log_manager: flow_log_manager.clone(),
         }
     }
 
@@ -80,15 +82,14 @@ impl<'a> Parser<'a> {
     /// completes. This enables the caller to pipeline downstream processing (batching, exporting)
     /// concurrently with ongoing S3 reads.
     ///
-    /// The flow log manager stored on `self` is queried per-record to detect VPC Flow Log files
-    /// delivered to S3 and enrich them with the corresponding flow log tags and format information.
+    /// Because `FlowLogManager` is now `Clone + Send + Sync`, each spawned task receives its own
+    /// cloned handle and resolves the VPC flow log configuration concurrently with the actual S3
+    /// object download.  This removes the serialisation point that previously forced config
+    /// look-ups to happen before task spawning.
     ///
     /// Returns `Ok(())` once all S3 objects have been processed. Individual object errors are
     /// logged but do not abort processing of remaining objects. A send error (receiver dropped)
     /// causes an early return with `Err`.
-    /// Process one completed task from `tasks`, forwarding any logs to `result_tx` and
-    /// accumulating the count into `total`. Returns `Ok(true)` if a task was processed,
-    /// `Ok(false)` if the set was empty, and `Err` if processing should abort.
     async fn drain_one_task(
         tasks: &mut JoinSet<Result<Vec<ResourceLogs>, ParserError>>,
         result_tx: &mpsc::Sender<Vec<ResourceLogs>>,
@@ -125,7 +126,7 @@ impl<'a> Parser<'a> {
     }
 
     pub async fn parse(
-        &mut self,
+        self,
         s3_event: S3Event,
         result_tx: mpsc::Sender<Vec<ResourceLogs>>,
     ) -> Result<(), ParserError> {
@@ -139,15 +140,13 @@ impl<'a> Parser<'a> {
 
         // Process records in parallel with controlled concurrency.
         //
-        // NOTE: FlowLogManager requires &mut self for its async cache look-ups, so we must
-        // resolve the per-record flow log config *before* spawning the task (which needs an
-        // owned, Send value). We look up the config here in the driver loop and pass the
-        // resolved Option<FlowLogConfig> into each task.
+        // Each spawned task receives a cloned `FlowLogManager` handle so that VPC flow log
+        // config look-ups happen concurrently with the S3 object download — there is no
+        // longer a need to pre-resolve the config in the driver loop before spawning.
         let mut tasks: JoinSet<Result<Vec<ResourceLogs>, ParserError>> = JoinSet::new();
         let max_concurrent = self.config.max_parallel_objects;
 
         for (idx, record) in s3_event.records.into_iter().enumerate() {
-            // Resolve the bucket name and object key early so we can query the flow log manager.
             let bucket_name = match record.s3.bucket.name.as_deref() {
                 Some(b) => b.to_string(),
                 None => {
@@ -165,21 +164,14 @@ impl<'a> Parser<'a> {
                 }
             };
 
-            // Look up VPC flow log config for this bucket + object key before spawning the task.
-            // Multiple flow logs may share the same bucket with different folder prefixes, so
-            // both pieces of information are needed to find the correct configuration.
-            let flow_log_config = self
-                .flow_log_manager
-                .get_config_by_bucket(&bucket_name, &object_key)
-                .await;
-
             let s3_client = self.s3_client.clone();
             let aws_attributes = self.aws_attributes.clone();
             let request_id = self.request_id.clone();
             let batch_size = self.config.batch_size;
+            // Clone the manager handle — cheap (Arc bump), safe to send across tasks.
+            let flow_log_manager = self.flow_log_manager.clone();
 
-            // Wait for the first task to finish if we've hit the concurrency limit, then
-            // stream its results immediately rather than accumulating them.
+            // Wait for a slot to open before spawning the next task.
             while tasks.len() >= max_concurrent {
                 if !Self::drain_one_task(
                     &mut tasks,
@@ -193,17 +185,25 @@ impl<'a> Parser<'a> {
                 }
             }
 
-            let s3_record = S3Record::new(
-                record,
-                idx,
-                s3_client,
-                aws_attributes,
-                request_id,
-                batch_size,
-                flow_log_config,
-            );
+            tasks.spawn(async move {
+                // Resolve the flow log config inside the task so the look-up runs
+                // concurrently with other in-flight tasks.
+                let flow_log_config = flow_log_manager
+                    .get_config_by_bucket(&bucket_name, &object_key)
+                    .await;
 
-            tasks.spawn(async move { s3_record.process().await });
+                let s3_record = S3Record::new(
+                    record,
+                    idx,
+                    s3_client,
+                    aws_attributes,
+                    request_id,
+                    batch_size,
+                    flow_log_config,
+                );
+
+                s3_record.process().await
+            });
         }
 
         // Drain remaining tasks, streaming each result as it completes.

@@ -128,22 +128,35 @@ impl FlowLogCache {
     // CloudWatch look-ups (keyed by log group name)
     // -----------------------------------------------------------------------
 
-    /// Get a mutable reference to the flow log configuration for a CloudWatch log group.
+    /// Get a clone of the flow log configuration for a CloudWatch log group.
     /// Returns `None` if not found or the cache is expired.
-    ///
-    /// Used for lazy initialisation of parsed fields.
-    pub fn get_mut_by_log_group(&mut self, log_group: &str) -> Option<&mut FlowLogConfig> {
+    pub fn get_by_log_group(&self, log_group: &str) -> Option<FlowLogConfig> {
         if self.is_expired() {
             debug!("Cache expired");
             return None;
         }
 
-        if let Some(config) = self.by_log_group.get_mut(log_group) {
-            trace!(log_group = %log_group, "Cache hit mutable (by_log_group)");
-            Some(config)
+        if let Some(config) = self.by_log_group.get(log_group) {
+            trace!(log_group = %log_group, "Cache hit (by_log_group)");
+            Some(config.clone())
         } else {
             trace!(log_group = %log_group, "Cache miss (by_log_group)");
             None
+        }
+    }
+
+    /// Write back lazily-computed `parsed_fields` for a CloudWatch log group entry.
+    ///
+    /// This is the counterpart to [`get_by_log_group`]: callers that compute
+    /// `parsed_fields` after a cache read can persist the result here so that
+    /// subsequent reads avoid re-parsing.  No-ops if the entry no longer exists.
+    pub fn set_parsed_fields_by_log_group(
+        &mut self,
+        log_group: &str,
+        parsed_fields: Arc<ParsedFields>,
+    ) {
+        if let Some(config) = self.by_log_group.get_mut(log_group) {
+            config.parsed_fields = Some(parsed_fields);
         }
     }
 
@@ -161,7 +174,7 @@ impl FlowLogCache {
     // S3 look-ups (keyed by bucket name + object key prefix)
     // -----------------------------------------------------------------------
 
-    /// Get a mutable reference to the flow log configuration for an S3 object.
+    /// Get a clone of the flow log configuration for an S3 object.
     ///
     /// Because multiple flow logs may share the same bucket (differentiated by a
     /// folder prefix in their destination ARN), this method accepts the full S3
@@ -170,27 +183,24 @@ impl FlowLogCache {
     /// as a catch-all and matches any key.
     ///
     /// Returns `None` if the cache is expired or no matching config is found.
-    pub fn get_mut_by_bucket(
-        &mut self,
-        bucket: &str,
-        object_key: &str,
-    ) -> Option<&mut FlowLogConfig> {
+    pub fn get_by_bucket(&self, bucket: &str, object_key: &str) -> Option<FlowLogConfig> {
         if self.is_expired() {
             debug!("Cache expired");
             return None;
         }
 
-        if let Some(configs) = self.by_bucket.get_mut(bucket) {
-            let matched = configs.iter_mut().find(|c| match &c.folder_prefix {
+        if let Some(configs) = self.by_bucket.get(bucket) {
+            let matched = configs.iter().find(|c| match &c.folder_prefix {
                 Some(prefix) => object_key.starts_with(prefix.as_str()),
                 None => true,
             });
-            if matched.is_some() {
-                trace!(bucket = %bucket, object_key = %object_key, "Cache hit mutable (by_bucket)");
+            if let Some(config) = matched {
+                trace!(bucket = %bucket, object_key = %object_key, "Cache hit (by_bucket)");
+                Some(config.clone())
             } else {
                 trace!(bucket = %bucket, object_key = %object_key, "Cache miss (by_bucket) — no prefix match");
+                None
             }
-            matched
         } else {
             trace!(bucket = %bucket, "Cache miss (by_bucket)");
             None
@@ -350,15 +360,15 @@ mod tests {
         cache.insert_by_log_group("/aws/ec2/flowlogs".to_string(), config.clone());
         cache.mark_refreshed();
 
-        let retrieved = cache.get_mut_by_log_group("/aws/ec2/flowlogs");
+        let retrieved = cache.get_by_log_group("/aws/ec2/flowlogs");
         assert!(retrieved.is_some());
-        assert_eq!(*retrieved.unwrap(), config);
+        assert_eq!(retrieved.unwrap(), config);
     }
 
     #[test]
     fn test_cache_miss_by_log_group() {
-        let mut cache = FlowLogCache::new();
-        let retrieved = cache.get_mut_by_log_group("non-existent");
+        let cache = FlowLogCache::new();
+        let retrieved = cache.get_by_log_group("non-existent");
         assert!(retrieved.is_none());
     }
 
@@ -380,15 +390,15 @@ mod tests {
         cache.insert_by_bucket("my-flow-logs-bucket".to_string(), config.clone());
         cache.mark_refreshed();
 
-        let retrieved = cache.get_mut_by_bucket("my-flow-logs-bucket", "some/object/key.log.gz");
+        let retrieved = cache.get_by_bucket("my-flow-logs-bucket", "some/object/key.log.gz");
         assert!(retrieved.is_some());
-        assert_eq!(*retrieved.unwrap(), config);
+        assert_eq!(retrieved.unwrap(), config);
     }
 
     #[test]
     fn test_cache_miss_by_bucket() {
-        let mut cache = FlowLogCache::new();
-        let retrieved = cache.get_mut_by_bucket("non-existent-bucket", "some/key.log.gz");
+        let cache = FlowLogCache::new();
+        let retrieved = cache.get_by_bucket("non-existent-bucket", "some/key.log.gz");
         assert!(retrieved.is_none());
     }
 
@@ -425,19 +435,19 @@ mod tests {
 
         // Key matching prefix A
         let key_a = "AWSLogs/111111111111/vpcflowlogs/us-east-1/2024/01/01/flow.log.gz";
-        let result = cache.get_mut_by_bucket("shared-bucket", key_a);
+        let result = cache.get_by_bucket("shared-bucket", key_a);
         assert!(result.is_some());
         assert_eq!(result.unwrap().flow_log_id, "fl-s3-prefix-a");
 
         // Key matching prefix B
         let key_b = "AWSLogs/222222222222/vpcflowlogs/us-west-2/2024/01/01/flow.log.gz";
-        let result = cache.get_mut_by_bucket("shared-bucket", key_b);
+        let result = cache.get_by_bucket("shared-bucket", key_b);
         assert!(result.is_some());
         assert_eq!(result.unwrap().flow_log_id, "fl-s3-prefix-b");
 
         // Key that matches neither prefix A nor B — falls through to the catch-all
         let key_other = "custom/path/flow.log.gz";
-        let result = cache.get_mut_by_bucket("shared-bucket", key_other);
+        let result = cache.get_by_bucket("shared-bucket", key_other);
         assert!(result.is_some());
         assert_eq!(result.unwrap().flow_log_id, "fl-s3-catchall");
     }
@@ -458,7 +468,7 @@ mod tests {
         cache.mark_refreshed();
 
         // Object key does not start with the configured prefix → no match
-        let result = cache.get_mut_by_bucket("my-bucket", "other-prefix/2024/01/01/flow.log.gz");
+        let result = cache.get_by_bucket("my-bucket", "other-prefix/2024/01/01/flow.log.gz");
         assert!(result.is_none());
     }
 
@@ -625,12 +635,12 @@ mod tests {
         cache.load_snapshot(snapshot);
 
         assert_eq!(
-            *cache.get_mut_by_log_group("/aws/ec2/flowlogs").unwrap(),
+            cache.get_by_log_group("/aws/ec2/flowlogs").unwrap(),
             cw_config
         );
         assert_eq!(
-            *cache
-                .get_mut_by_bucket("my-bucket", "AWSLogs/2024/01/01/flow.log.gz")
+            cache
+                .get_by_bucket("my-bucket", "AWSLogs/2024/01/01/flow.log.gz")
                 .unwrap(),
             s3_config
         );
@@ -693,11 +703,63 @@ mod tests {
         cache.insert_by_log_group("/aws/ec2/flowlogs".to_string(), config.clone());
         cache.mark_refreshed();
 
-        let retrieved = cache.get_mut_by_log_group("/aws/ec2/flowlogs").unwrap();
+        let retrieved = cache.get_by_log_group("/aws/ec2/flowlogs").unwrap();
         assert_eq!(retrieved.tags.len(), 3);
         assert_eq!(retrieved.tags.get("Environment").unwrap(), "production");
         assert_eq!(retrieved.tags.get("Team").unwrap(), "platform");
         assert_eq!(retrieved.tags.get("Application").unwrap(), "vpc-monitoring");
+    }
+
+    // ------------------------------------------------------------------
+    // set_parsed_fields write-back tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_set_parsed_fields_by_log_group() {
+        let mut cache = FlowLogCache::new();
+
+        let config = FlowLogConfig {
+            log_format: "${version} ${account-id}".to_string(),
+            flow_log_id: "fl-123".to_string(),
+            tags: HashMap::new(),
+            folder_prefix: None,
+            parsed_fields: None,
+        };
+        cache.insert_by_log_group("/aws/ec2/flowlogs".to_string(), config);
+        cache.mark_refreshed();
+
+        // Initially no parsed fields
+        let retrieved = cache.get_by_log_group("/aws/ec2/flowlogs").unwrap();
+        assert!(retrieved.parsed_fields.is_none());
+
+        // Write back parsed fields
+        let fields = Arc::new(ParsedFields::Success(vec![
+            ParsedField::new("version".to_string(), ParsedFieldType::Int32),
+            ParsedField::new("account-id".to_string(), ParsedFieldType::String),
+        ]));
+        cache.set_parsed_fields_by_log_group("/aws/ec2/flowlogs", fields.clone());
+
+        // Now should be present
+        let retrieved = cache.get_by_log_group("/aws/ec2/flowlogs").unwrap();
+        assert!(retrieved.parsed_fields.is_some());
+        if let ParsedFields::Success(fs) = retrieved.parsed_fields.unwrap().as_ref() {
+            assert_eq!(fs.len(), 2);
+            assert_eq!(fs[0].field_name, "version");
+        } else {
+            panic!("Expected Success");
+        }
+    }
+
+    #[test]
+    fn test_set_parsed_fields_by_log_group_noop_on_missing_key() {
+        let mut cache = FlowLogCache::new();
+        cache.mark_refreshed();
+
+        // Should not panic when key does not exist
+        let fields = Arc::new(ParsedFields::Success(vec![]));
+        cache.set_parsed_fields_by_log_group("/does/not/exist", fields);
+        // Cache stays empty
+        assert!(cache.is_empty());
     }
 
     // ------------------------------------------------------------------
@@ -757,7 +819,7 @@ mod tests {
         cache.insert_by_log_group("/aws/ec2/flowlogs".to_string(), config.clone());
         cache.mark_refreshed();
 
-        let retrieved = cache.get_mut_by_log_group("/aws/ec2/flowlogs").unwrap();
+        let retrieved = cache.get_by_log_group("/aws/ec2/flowlogs").unwrap();
         assert!(retrieved.parsed_fields.is_some());
         if let Some(parsed_fields) = &retrieved.parsed_fields {
             if let ParsedFields::Success(fields) = parsed_fields.as_ref() {
@@ -787,7 +849,7 @@ mod tests {
         cache.insert_by_log_group("/aws/ec2/flowlogs".to_string(), config);
         cache.mark_refreshed();
 
-        let retrieved = cache.get_mut_by_log_group("/aws/ec2/flowlogs").unwrap();
+        let retrieved = cache.get_by_log_group("/aws/ec2/flowlogs").unwrap();
         if let Some(parsed_fields) = &retrieved.parsed_fields {
             if let ParsedFields::Error(msg) = parsed_fields.as_ref() {
                 assert_eq!(msg, "Parse failed");

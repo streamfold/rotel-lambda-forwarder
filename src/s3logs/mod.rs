@@ -139,10 +139,6 @@ impl Parser {
         let mut total_resource_logs: usize = 0;
 
         // Process records in parallel with controlled concurrency.
-        //
-        // Each spawned task receives a cloned `FlowLogManager` handle so that VPC flow log
-        // config look-ups happen concurrently with the S3 object download — there is no
-        // longer a need to pre-resolve the config in the driver loop before spawning.
         let mut tasks: JoinSet<Result<Vec<ResourceLogs>, ParserError>> = JoinSet::new();
         let max_concurrent = self.config.max_parallel_objects;
 
@@ -185,13 +181,12 @@ impl Parser {
                 }
             }
 
-            tasks.spawn(async move {
-                // Resolve the flow log config inside the task so the look-up runs
-                // concurrently with other in-flight tasks.
-                let flow_log_config = flow_log_manager
-                    .get_config_by_bucket(&bucket_name, &object_key)
-                    .await;
+            // Lookup the flow log config
+            let flow_log_config = flow_log_manager
+                .get_config_by_bucket(&bucket_name, &object_key)
+                .await;
 
+            tasks.spawn(async move {
                 let s3_record = S3Record::new(
                     record,
                     idx,

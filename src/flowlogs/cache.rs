@@ -84,8 +84,8 @@ pub struct FlowLogConfig {
     pub tags: std::collections::HashMap<String, String>,
 
     /// Optional S3 folder prefix from the flow log destination ARN
-    /// (e.g., "AWSLogs/123456789012/vpcflowlogs/us-east-1/" from
-    /// "arn:aws:s3:::my-bucket/AWSLogs/123456789012/vpcflowlogs/us-east-1/").
+    /// (e.g., "vpc-a/" from
+    /// "arn:aws:s3:::vpc-a/").
     /// `None` for CloudWatch destinations or S3 destinations with no prefix.
     #[serde(default)]
     pub folder_prefix: Option<String>,

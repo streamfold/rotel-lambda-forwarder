@@ -13,23 +13,23 @@ use crate::parse::{platform::ParserError, record_parser::RecordParserError};
 /// Parse a JSON log entry and return the parsed map
 /// Returns an error if the message is not valid JSON or not an object
 pub(crate) fn parse_json_to_map(
-    msg: String,
+    msg: &str,
 ) -> Result<serde_json::Map<String, JsonValue>, RecordParserError> {
     // Parse the message as JSON
-    let json_map: serde_json::Map<String, JsonValue> = match serde_json::from_str(&msg) {
+    let json_map: serde_json::Map<String, JsonValue> = match serde_json::from_str(msg) {
         Ok(JsonValue::Object(map)) => map,
         Ok(_) => {
             // Not an object
             return Err(RecordParserError(
                 ParserError::FormatParseError("JSON log entry is not an object".to_string()),
-                msg,
+                msg.to_string(),
             ));
         }
         Err(e) => {
             // Failed to parse JSON
             return Err(RecordParserError(
                 ParserError::JsonParseError(e.to_string()),
-                msg,
+                msg.to_string(),
             ));
         }
     };

@@ -13,19 +13,38 @@ use std::sync::Arc;
 
 use serde_json::Value as JsonValue;
 
-use crate::flowlogs::{ParsedFieldType, ParsedFields};
+use crate::flowlogs::{ParsedField, ParsedFieldType, ParsedFields, get_field_type};
 use crate::parse::{platform::ParserError, record_parser::RecordParserError};
+
+/// Parse a VPC flow log header line into a list of typed fields.
+///
+/// The header is the first line of an S3-delivered VPC flow log file and contains
+/// space-separated field names, e.g.:
+///
+/// ```text
+/// version account-id interface-id srcaddr dstaddr srcport dstport protocol packets bytes start end action log-status
+/// ```
+///
+/// Each name is looked up in the field-type map so that numeric fields are given the
+/// correct `Int32` / `Int64` type, matching the behaviour of `parse_log_format` for
+/// CloudWatch-delivered flow logs.
+pub(crate) fn parse_vpclog_header(header: &str) -> Vec<ParsedField> {
+    header
+        .split_whitespace()
+        .map(|name| ParsedField::new(name.to_string(), get_field_type(name)))
+        .collect()
+}
 
 /// Parse an EC2 Flow Log record from a string using pre-parsed field names
 /// Fields with value "-" are excluded from the result
 /// Returns an error if the record doesn't have the expected number of fields
 pub(crate) fn parse_vpclog_to_map(
-    input: String,
+    input: &str,
     parsed_fields: Arc<ParsedFields>,
 ) -> Result<serde_json::Map<String, JsonValue>, RecordParserError> {
     match parsed_fields.as_ref() {
         ParsedFields::Success(parsed_fields) => {
-            let field_values = parse_vpclog_fields(&input);
+            let field_values = parse_vpclog_fields(input);
 
             if field_values.len() != parsed_fields.len() {
                 return Err(RecordParserError(
@@ -34,7 +53,7 @@ pub(crate) fn parse_vpclog_to_map(
                         parsed_fields.len(),
                         field_values.len()
                     )),
-                    input,
+                    input.to_string(),
                 ));
             }
 
@@ -92,10 +111,67 @@ mod tests {
     use super::*;
     use crate::cwlogs::ParserType;
     use crate::cwlogs::record_parser::RecordParser;
-    use crate::flowlogs::parse_log_format;
+    use crate::flowlogs::{ParsedFieldType, parse_log_format};
     use crate::parse::platform::LogPlatform;
     use aws_lambda_events::cloudwatch_logs::LogEntry;
     use opentelemetry_proto::tonic::{common::v1::any_value::Value, logs::v1::LogRecord};
+
+    #[test]
+    fn test_parse_vpclog_header_types() {
+        let header = "version account-id interface-id srcaddr dstaddr srcport dstport protocol packets bytes start end action log-status";
+        let fields = parse_vpclog_header(header);
+
+        assert_eq!(fields.len(), 14);
+
+        // Spot-check names
+        assert_eq!(fields[0].field_name, "version");
+        assert_eq!(fields[1].field_name, "account-id");
+        assert_eq!(fields[13].field_name, "log-status");
+
+        // Numeric types
+        assert_eq!(fields[0].field_type, ParsedFieldType::Int32); // version
+        assert_eq!(fields[5].field_type, ParsedFieldType::Int32); // srcport
+        assert_eq!(fields[6].field_type, ParsedFieldType::Int32); // dstport
+        assert_eq!(fields[7].field_type, ParsedFieldType::Int32); // protocol
+        assert_eq!(fields[8].field_type, ParsedFieldType::Int64); // packets
+        assert_eq!(fields[9].field_type, ParsedFieldType::Int64); // bytes
+        assert_eq!(fields[10].field_type, ParsedFieldType::Int64); // start
+        assert_eq!(fields[11].field_type, ParsedFieldType::Int64); // end
+
+        // String types
+        assert_eq!(fields[1].field_type, ParsedFieldType::String); // account-id
+        assert_eq!(fields[2].field_type, ParsedFieldType::String); // interface-id
+        assert_eq!(fields[3].field_type, ParsedFieldType::String); // srcaddr
+        assert_eq!(fields[4].field_type, ParsedFieldType::String); // dstaddr
+        assert_eq!(fields[12].field_type, ParsedFieldType::String); // action
+        assert_eq!(fields[13].field_type, ParsedFieldType::String); // log-status
+    }
+
+    #[test]
+    fn test_parse_vpclog_header_matches_parse_log_format() {
+        // The header line and the ${field} format string must produce identical ParsedField lists.
+        let header = "version account-id interface-id srcaddr dstaddr srcport dstport protocol packets bytes start end action log-status";
+        let format = "${version} ${account-id} ${interface-id} ${srcaddr} ${dstaddr} ${srcport} ${dstport} ${protocol} ${packets} ${bytes} ${start} ${end} ${action} ${log-status}";
+
+        let from_header = parse_vpclog_header(header);
+        let from_format = parse_log_format(format);
+
+        assert_eq!(from_header, from_format);
+    }
+
+    #[test]
+    fn test_parse_vpclog_header_unknown_field_defaults_to_string() {
+        let fields = parse_vpclog_header("some-new-field another-new-field");
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].field_type, ParsedFieldType::String);
+        assert_eq!(fields[1].field_type, ParsedFieldType::String);
+    }
+
+    #[test]
+    fn test_parse_vpclog_header_empty() {
+        let fields = parse_vpclog_header("");
+        assert!(fields.is_empty());
+    }
 
     const DEFAULT_FORMAT: &'static str = "${version} ${account-id} ${interface-id} ${srcaddr} ${dstaddr} ${srcport} ${dstport} ${protocol} ${packets} ${bytes} ${start} ${end} ${action} ${log-status}";
 
@@ -121,7 +197,7 @@ mod tests {
     }
 
     fn parse_vpclog_to_map_default(
-        input: String,
+        input: &str,
     ) -> Result<serde_json::Map<String, JsonValue>, RecordParserError> {
         let dflt_fields = parse_log_format(DEFAULT_FORMAT);
         parse_vpclog_to_map(input, Arc::new(ParsedFields::Success(dflt_fields)))
@@ -157,7 +233,7 @@ mod tests {
     #[test]
     fn test_parse_vpclog_to_map_basic_tcp() {
         let input = "2 123456789010 eni-1235b8ca123456789 172.31.16.139 172.31.16.21 20641 22 6 20 4249 1418530010 1418530070 ACCEPT OK";
-        let result = parse_vpclog_to_map_default(input.to_string());
+        let result = parse_vpclog_to_map_default(input);
 
         assert!(result.is_ok());
         let map = result.unwrap();
@@ -226,10 +302,7 @@ mod tests {
         let log_format = "${version} ${account-id} ${srcaddr} ${dstaddr}";
         let input = "2 123456789010 172.31.16.139 172.31.16.21";
         let parsed_fields = parse_log_format(log_format);
-        let result = parse_vpclog_to_map(
-            input.to_string(),
-            Arc::new(ParsedFields::Success(parsed_fields)),
-        );
+        let result = parse_vpclog_to_map(input, Arc::new(ParsedFields::Success(parsed_fields)));
 
         assert!(result.is_ok());
         let map = result.unwrap();
@@ -258,10 +331,7 @@ mod tests {
         let log_format = "${version} ${account-id} ${srcaddr} ${dstaddr}";
         let input = "2 123456789010 - 172.31.16.21";
         let parsed_fields = parse_log_format(log_format);
-        let result = parse_vpclog_to_map(
-            input.to_string(),
-            Arc::new(ParsedFields::Success(parsed_fields)),
-        );
+        let result = parse_vpclog_to_map(input, Arc::new(ParsedFields::Success(parsed_fields)));
 
         assert!(result.is_ok());
         let map = result.unwrap();
@@ -285,7 +355,7 @@ mod tests {
     #[test]
     fn test_parse_vpclog_to_map_reject() {
         let input = "2 123456789010 eni-1235b8ca123456789 172.31.9.69 172.31.9.12 49761 3389 6 20 4249 1418530010 1418530070 REJECT OK";
-        let result = parse_vpclog_to_map_default(input.to_string());
+        let result = parse_vpclog_to_map_default(input);
 
         assert!(result.is_ok());
         let map = result.unwrap();
@@ -308,7 +378,7 @@ mod tests {
     fn test_parse_vpclog_to_map_with_dashes() {
         let input =
             "2 123456789010 eni-1235b8ca123456789 - - - - - - - 1431280876 1431280934 - NODATA";
-        let result = parse_vpclog_to_map_default(input.to_string());
+        let result = parse_vpclog_to_map_default(input);
 
         assert!(result.is_ok());
         let map = result.unwrap();
@@ -349,7 +419,7 @@ mod tests {
     #[test]
     fn test_parse_vpclog_to_map_icmp() {
         let input = "2 123456789010 eni-1235b8ca123456789 203.0.113.12 172.31.16.139 0 0 1 4 336 1432917027 1432917142 ACCEPT OK";
-        let result = parse_vpclog_to_map_default(input.to_string());
+        let result = parse_vpclog_to_map_default(input);
 
         assert!(result.is_ok());
         let map = result.unwrap();
@@ -375,7 +445,7 @@ mod tests {
     #[test]
     fn test_parse_vpclog_to_map_ipv6() {
         let input = "2 123456789010 eni-1235b8ca123456789 2001:db8:1234:a100:8d6e:3477:df66:f105 2001:db8:1234:a102:3304:8879:34cf:4071 34892 22 6 54 8855 1477913708 1477913820 ACCEPT OK";
-        let result = parse_vpclog_to_map_default(input.to_string());
+        let result = parse_vpclog_to_map_default(input);
 
         assert!(result.is_ok());
         let map = result.unwrap();
@@ -405,7 +475,7 @@ mod tests {
     #[test]
     fn test_parse_vpclog_to_map_invalid_field_count() {
         let input = "2 123456789010 eni-1235b8ca123456789 172.31.16.139";
-        let result = parse_vpclog_to_map_default(input.to_string());
+        let result = parse_vpclog_to_map_default(input);
 
         assert!(result.is_err());
     }
@@ -413,7 +483,7 @@ mod tests {
     #[test]
     fn test_parse_vpclog_to_map_empty() {
         let input = "";
-        let result = parse_vpclog_to_map_default(input.to_string());
+        let result = parse_vpclog_to_map_default(input);
 
         assert!(result.is_err());
     }
@@ -600,7 +670,7 @@ mod tests {
         ];
 
         for example in examples {
-            let result = parse_vpclog_to_map_default(example.to_string());
+            let result = parse_vpclog_to_map_default(example);
             assert!(result.is_ok(), "Failed to parse: {}", example);
 
             let log_record = parse_log_msg(example);
@@ -618,10 +688,7 @@ mod tests {
         let log_format = "${version} ${account-id} ${srcport} ${dstport}";
         let input = "2 123456789010 invalid-port 22";
         let parsed_fields = parse_log_format(log_format);
-        let result = parse_vpclog_to_map(
-            input.to_string(),
-            Arc::new(ParsedFields::Success(parsed_fields)),
-        );
+        let result = parse_vpclog_to_map(input, Arc::new(ParsedFields::Success(parsed_fields)));
 
         // Should return an error because srcport (Int32) cannot parse "invalid-port"
         assert!(result.is_err());
@@ -638,10 +705,7 @@ mod tests {
         let log_format = "${version} ${account-id} ${bytes} ${packets}";
         let input = "2 123456789010 not-a-number 100";
         let parsed_fields = parse_log_format(log_format);
-        let result = parse_vpclog_to_map(
-            input.to_string(),
-            Arc::new(ParsedFields::Success(parsed_fields)),
-        );
+        let result = parse_vpclog_to_map(input, Arc::new(ParsedFields::Success(parsed_fields)));
 
         // Should return an error because bytes (Int64) cannot parse "not-a-number"
         assert!(result.is_err());

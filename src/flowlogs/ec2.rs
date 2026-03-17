@@ -18,6 +18,20 @@ pub enum Ec2Error {
     InvalidFormat(String),
 }
 
+/// The result of fetching all EC2 Flow Log configurations.
+///
+/// Flow logs are partitioned by their delivery destination type:
+/// - `by_log_group`: keyed by CloudWatch log group name
+/// - `by_bucket`:    keyed by S3 bucket name (extracted from the `log-destination` ARN).
+///                   Multiple flow logs may share a bucket, differentiated by folder prefix.
+#[derive(Debug, Default)]
+pub struct FetchedFlowLogs {
+    /// CloudWatch-delivered flow logs: log_group_name → config
+    pub by_log_group: HashMap<String, FlowLogConfig>,
+    /// S3-delivered flow logs: bucket_name → list of configs (one per distinct folder prefix)
+    pub by_bucket: HashMap<String, Vec<FlowLogConfig>>,
+}
+
 /// Fetcher for EC2 Flow Log configurations from EC2 API
 ///
 /// This fetcher queries the EC2 DescribeFlowLogs API to retrieve EC2 Flow Log
@@ -34,12 +48,15 @@ impl Ec2FlowLogFetcher {
         Self { client }
     }
 
-    /// Fetch all EC2 Flow Logs that are delivered to CloudWatch Logs
+    /// Fetch all EC2 Flow Logs, partitioned by destination type.
     ///
-    /// Returns a map of log group name to flow log configuration.
-    /// Only includes flow logs with destination type "cloud-watch-logs".
+    /// - CloudWatch Logs destinations are keyed by log group name.
+    /// - S3 destinations are keyed by bucket name extracted from the destination ARN
+    ///   (`arn:aws:s3:::bucket-name[/optional-prefix]`).
     ///
-    pub async fn fetch_all_flow_logs(&self) -> Result<HashMap<String, FlowLogConfig>, Ec2Error> {
+    /// Flow logs with missing or unrecognised destination information are skipped with a
+    /// warning so that a single misconfigured flow log cannot block the others.
+    pub async fn fetch_all_flow_logs(&self) -> Result<FetchedFlowLogs, Ec2Error> {
         debug!("Fetching VPC flow logs from EC2 API");
 
         let result = self.client.describe_flow_logs().send().await;
@@ -56,23 +73,11 @@ impl Ec2FlowLogFetcher {
             }
         };
 
-        let mut flow_log_configs = HashMap::new();
+        let mut fetched = FetchedFlowLogs::default();
 
-        // flow_logs() returns a slice, not an Option
         for flow_log in response.flow_logs() {
-            // Only process CloudWatch Logs destinations
-            match flow_log.log_destination_type() {
-                Some(LogDestinationType::CloudWatchLogs) => {
-                    // Continue processing this flow log
-                }
-                Some(v) => {
-                    debug!(
-                        flow_log_id = ?flow_log.flow_log_id(),
-                        log_destination_type = v.to_string(),
-                        "Skipping flow log with non-CloudWatch destination"
-                    );
-                    continue;
-                }
+            let destination_type = match flow_log.log_destination_type() {
+                Some(t) => t,
                 None => {
                     debug!(
                         flow_log_id = ?flow_log.flow_log_id(),
@@ -80,37 +85,22 @@ impl Ec2FlowLogFetcher {
                     );
                     continue;
                 }
-            }
-
-            // Get the log group name
-            let log_group_name = match flow_log.log_group_name() {
-                Some(name) => name,
-                None => {
-                    warn!(
-                        flow_log_id = ?flow_log.flow_log_id(),
-                        "Flow log missing log group name, skipping"
-                    );
-                    continue;
-                }
             };
 
             let log_format = match flow_log.log_format().map(|s| s.to_string()) {
-                Some(log_format) => log_format,
+                Some(f) => f,
                 None => {
                     warn!(
                         flow_log_id = ?flow_log.flow_log_id(),
                         "Flow log missing log format, skipping"
                     );
-
                     continue;
                 }
             };
 
             let flow_log_id = flow_log.flow_log_id().unwrap_or("unknown").to_string();
 
-            // Extract tags from the flow log
-            // These tags will be applied to logs as resource attributes
-            // with the prefix "ec2.flow-logs.tags.<key>"
+            // Extract tags
             let mut tags = HashMap::new();
             for tag in flow_log.tags() {
                 if let (Some(key), Some(value)) = (tag.key(), tag.value()) {
@@ -122,25 +112,136 @@ impl Ec2FlowLogFetcher {
                 log_format,
                 flow_log_id: flow_log_id.clone(),
                 tags,
+                folder_prefix: None, // set below for S3 destinations
                 parsed_fields: None,
             };
 
-            debug!(
-                log_group = %log_group_name,
-                flow_log_id = %flow_log_id,
-                tag_count = config.tags.len(),
-                "Found EC2 flow log configuration with tags"
-            );
+            match destination_type {
+                LogDestinationType::CloudWatchLogs => {
+                    let log_group_name = match flow_log.log_group_name() {
+                        Some(name) => name,
+                        None => {
+                            warn!(
+                                flow_log_id = %flow_log_id,
+                                "CloudWatch flow log missing log group name, skipping"
+                            );
+                            continue;
+                        }
+                    };
 
-            flow_log_configs.insert(log_group_name.to_string(), config);
+                    debug!(
+                        log_group = %log_group_name,
+                        flow_log_id = %flow_log_id,
+                        tag_count = config.tags.len(),
+                        "Found CloudWatch EC2 flow log configuration"
+                    );
+
+                    fetched
+                        .by_log_group
+                        .insert(log_group_name.to_string(), config);
+                }
+
+                LogDestinationType::S3 => {
+                    let destination_arn = match flow_log.log_destination() {
+                        Some(arn) => arn,
+                        None => {
+                            warn!(
+                                flow_log_id = %flow_log_id,
+                                "S3 flow log missing log_destination ARN, skipping"
+                            );
+                            continue;
+                        }
+                    };
+
+                    let (bucket_name, folder_prefix) = match extract_bucket_and_prefix_from_arn(
+                        destination_arn,
+                    ) {
+                        Some(parts) => parts,
+                        None => {
+                            warn!(
+                                flow_log_id = %flow_log_id,
+                                destination_arn = %destination_arn,
+                                "Unable to extract bucket name from S3 flow log destination ARN, skipping"
+                            );
+                            continue;
+                        }
+                    };
+
+                    debug!(
+                        bucket = %bucket_name,
+                        folder_prefix = ?folder_prefix,
+                        flow_log_id = %flow_log_id,
+                        tag_count = config.tags.len(),
+                        "Found S3 EC2 flow log configuration"
+                    );
+
+                    let s3_config = FlowLogConfig {
+                        folder_prefix,
+                        ..config
+                    };
+                    fetched
+                        .by_bucket
+                        .entry(bucket_name)
+                        .or_default()
+                        .push(s3_config);
+                }
+
+                other => {
+                    debug!(
+                        flow_log_id = %flow_log_id,
+                        log_destination_type = other.to_string(),
+                        "Skipping flow log with unsupported destination type"
+                    );
+                }
+            }
         }
 
+        let s3_config_count: usize = fetched.by_bucket.values().map(|v| v.len()).sum();
         info!(
-            count = flow_log_configs.len(),
+            cloudwatch_count = fetched.by_log_group.len(),
+            s3_bucket_count = fetched.by_bucket.len(),
+            s3_config_count,
             "Fetched EC2 flow log configurations from EC2"
         );
 
-        Ok(flow_log_configs)
+        Ok(fetched)
+    }
+}
+
+/// Extract the bucket name and optional folder prefix from an S3 ARN of the form
+/// `arn:aws:s3:::bucket-name` or `arn:aws:s3:::bucket-name/optional/prefix`.
+///
+/// Returns `Some((bucket, folder_prefix))` where `folder_prefix` is `None` when no
+/// prefix path is present in the ARN, or `Some(prefix)` otherwise.
+/// Returns `None` if the ARN does not have the expected structure.
+pub(crate) fn extract_bucket_and_prefix_from_arn(arn: &str) -> Option<(String, Option<String>)> {
+    // ARN format: arn:partition:s3:region:account-id:resource
+    // For S3, region and account-id may be empty (e.g. "arn:aws:s3:::bucket-name")
+    // or populated (e.g. "arn:aws:s3:us-east-1:123456789012:bucket-name").
+    // We always split on ":" and take the 6th field (index 5) onward as the resource.
+    let resource = arn.splitn(6, ':').nth(5)?;
+    if resource.is_empty() {
+        return None;
+    }
+    // The bucket name is the first path component; anything after the first '/' is the prefix.
+    match resource.splitn(2, '/').collect::<Vec<_>>().as_slice() {
+        [bucket] => {
+            if bucket.is_empty() {
+                None
+            } else {
+                Some((bucket.to_string(), None))
+            }
+        }
+        [bucket, prefix] => {
+            if bucket.is_empty() {
+                None
+            } else if prefix.is_empty() {
+                Some((bucket.to_string(), None))
+            } else {
+                Some((bucket.to_string(), Some(prefix.to_string())))
+            }
+        }
+        _ => None,
     }
 }
 
@@ -157,5 +258,76 @@ mod tests {
         let fetcher = Ec2FlowLogFetcher::new(ec2_client);
         // Just verify we can create the fetcher
         assert!(std::mem::size_of_val(&fetcher) > 0);
+    }
+
+    #[test]
+    fn test_extract_bucket_and_prefix_from_arn_simple() {
+        let arn = "arn:aws:s3:::my-flow-logs-bucket";
+        assert_eq!(
+            extract_bucket_and_prefix_from_arn(arn),
+            Some(("my-flow-logs-bucket".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn test_extract_bucket_and_prefix_from_arn_with_prefix() {
+        let arn = "arn:aws:s3:::my-flow-logs-bucket/vpc-flow-logs/";
+        assert_eq!(
+            extract_bucket_and_prefix_from_arn(arn),
+            Some((
+                "my-flow-logs-bucket".to_string(),
+                Some("vpc-flow-logs/".to_string())
+            ))
+        );
+    }
+
+    #[test]
+    fn test_extract_bucket_and_prefix_from_arn_with_deep_prefix() {
+        let arn = "arn:aws:s3:::my-bucket/AWSLogs/123456789012/vpcflowlogs/us-east-1/";
+        assert_eq!(
+            extract_bucket_and_prefix_from_arn(arn),
+            Some((
+                "my-bucket".to_string(),
+                Some("AWSLogs/123456789012/vpcflowlogs/us-east-1/".to_string())
+            ))
+        );
+    }
+
+    #[test]
+    fn test_extract_bucket_and_prefix_from_arn_trailing_slash_only() {
+        // arn:aws:s3:::bucket/ — slash present but prefix is empty string
+        let arn = "arn:aws:s3:::my-bucket/";
+        assert_eq!(
+            extract_bucket_and_prefix_from_arn(arn),
+            Some(("my-bucket".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn test_extract_bucket_and_prefix_from_arn_with_region_and_account() {
+        let arn = "arn:aws:s3:us-east-1:123456789012:my-flow-logs-bucket";
+        assert_eq!(
+            extract_bucket_and_prefix_from_arn(arn),
+            Some(("my-flow-logs-bucket".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn test_extract_bucket_and_prefix_from_arn_with_region_and_account_and_prefix() {
+        let arn = "arn:aws:s3:us-east-1:123456789012:my-flow-logs-bucket/vpc-flow-logs/";
+        assert_eq!(
+            extract_bucket_and_prefix_from_arn(arn),
+            Some((
+                "my-flow-logs-bucket".to_string(),
+                Some("vpc-flow-logs/".to_string())
+            ))
+        );
+    }
+
+    #[test]
+    fn test_extract_bucket_and_prefix_from_arn_invalid() {
+        assert_eq!(extract_bucket_and_prefix_from_arn("not-an-arn"), None);
+        assert_eq!(extract_bucket_and_prefix_from_arn("arn:aws:s3:::"), None);
+        assert_eq!(extract_bucket_and_prefix_from_arn(""), None);
     }
 }

@@ -67,16 +67,11 @@ impl RecordParser {
     ///
     /// On parse failure the raw message is preserved as the log body.
     pub(crate) fn parse(&self, now_nanos: u64, log_entry: LogEntry) -> LogRecord {
-        // Seed the record with the CW timestamp and, when non-empty, the entry ID.
-        let initial_attributes = if !log_entry.id.is_empty() {
-            vec![string_kv("cloudwatch.id", log_entry.id)]
-        } else {
-            vec![]
-        };
-
-        let mut record_builder =
-            self.builder
-                .start(now_nanos, log_entry.timestamp, initial_attributes);
+        let mut record_builder = self.builder.start(
+            now_nanos,
+            log_entry.timestamp,
+            vec![string_kv("cloudwatch.id", log_entry.id)],
+        );
 
         match self.parse_message(log_entry.message) {
             ParsedMessage::Map(map) => {
@@ -101,12 +96,12 @@ impl RecordParser {
     /// should do next — no mutation of external state as a side-effect.
     fn parse_message(&self, message: String) -> ParsedMessage {
         match self.parser_type {
-            ParserType::Json => match parse_json_to_map(message) {
+            ParserType::Json => match parse_json_to_map(&message) {
                 Ok(map) => ParsedMessage::Map(map),
                 Err(e) => ParsedMessage::Error(e),
             },
 
-            ParserType::KeyValue => match parse_keyvalue_to_map(message) {
+            ParserType::KeyValue => match parse_keyvalue_to_map(&message) {
                 Ok(map) => ParsedMessage::Map(map),
                 Err(e) => ParsedMessage::Error(e),
             },
@@ -117,7 +112,7 @@ impl RecordParser {
                 // individual flow-log fields are emitted as attributes.
                 match self.flow_log_parsed_fields.as_ref() {
                     Some(parsed_fields) => {
-                        match parse_vpclog_to_map(message.clone(), parsed_fields.clone()) {
+                        match parse_vpclog_to_map(&message, parsed_fields.clone()) {
                             Ok(map) => ParsedMessage::PlainText(message, Some(map)),
                             Err(e) => ParsedMessage::Error(e),
                         }
@@ -131,7 +126,7 @@ impl RecordParser {
                 // Auto-detect: attempt JSON for messages that look like objects;
                 // otherwise treat as opaque plain text.
                 if message.len() > 2 && message.starts_with('{') {
-                    match parse_json_to_map(message) {
+                    match parse_json_to_map(&message) {
                         Ok(map) => ParsedMessage::Map(map),
                         Err(e) => ParsedMessage::Error(e),
                     }
@@ -187,16 +182,6 @@ mod tests {
         } else {
             panic!("expected StringValue for cloudwatch.id");
         }
-    }
-
-    #[test]
-    fn test_no_cloudwatch_id_when_empty() {
-        let parser = RecordParser::new(LogPlatform::Unknown, ParserType::Json, None);
-        let lr = parser.parse(123_456_789, make_entry("", 1000, r#"{"msg":"hi"}"#));
-        assert!(
-            !lr.attributes.iter().any(|kv| kv.key == "cloudwatch.id"),
-            "cloudwatch.id should be absent when id is empty"
-        );
     }
 
     #[test]

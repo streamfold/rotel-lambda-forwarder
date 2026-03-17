@@ -72,7 +72,7 @@ impl Forwarder {
             aws_attributes,
             &context.request_id,
             &mut self.tag_manager,
-            &mut self.flow_log_manager,
+            &self.flow_log_manager,
         );
 
         // Parse the logs
@@ -141,23 +141,25 @@ impl Forwarder {
             lambda_runtime::Error::from("S3 client not initialized for S3 event processing")
         })?;
 
-        let parser = s3logs::Parser::new(aws_attributes, &context.request_id, s3_client);
+        let parser = s3logs::Parser::new(
+            aws_attributes,
+            &context.request_id,
+            s3_client,
+            &self.flow_log_manager,
+        );
 
-        // Create a channel so the parse task can stream batches of ResourceLogs to us as each
-        // S3 object completes, rather than waiting for all objects before forwarding anything.
+        // Create a channel so per-object tasks can stream batches of ResourceLogs.
         // Buffer depth matches typical max-parallel-objects (default 5) with some headroom.
         let (result_tx, mut result_rx) = tokio::sync::mpsc::channel::<Vec<ResourceLogs>>(32);
 
-        // Spawn the parse task so it runs concurrently with the forwarding loop below.
-        let parse_handle = tokio::spawn(async move { parser.parse(s3_event, result_tx).await });
+        let parse_task = tokio::spawn(parser.parse(s3_event, result_tx));
 
-        // Split into counter + waiter. The drain task starts immediately inside into_parts(),
-        // so ack senders are never blocked regardless of how many messages are in flight.
+        // Split into counter + waiter before draining so the drain task starts immediately
+        // and ack senders are never blocked.
         let (mut counter, waiter) = AckerBuilder::new(context.request_id.clone()).into_parts();
         let mut count: usize = 0;
 
-        // Forward each batch to logs_tx as it arrives — this runs concurrently with the parse
-        // task, giving downstream batching / exporting a head-start before parsing is complete.
+        // Drain completed batches as they arrive from the spawned parse task.
         while let Some(logs) = result_rx.recv().await {
             for log in logs {
                 count += 1;
@@ -180,9 +182,8 @@ impl Forwarder {
             }
         }
 
-        // The result_rx loop above ends only after result_tx is dropped, which happens when the
-        // parse task exits. Join here to surface any parse errors.
-        match parse_handle.await {
+        // result_rx is now closed; collect the parse result.
+        match parse_task.await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 error!(
@@ -198,7 +199,10 @@ impl Forwarder {
                     error = %e,
                     "S3 parse task panicked"
                 );
-                return Err(lambda_runtime::Error::from(e.to_string()));
+                return Err(lambda_runtime::Error::from(format!(
+                    "S3 parse task panicked: {}",
+                    e
+                )));
             }
         }
 

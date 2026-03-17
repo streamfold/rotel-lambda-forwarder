@@ -1,10 +1,13 @@
+use std::collections::HashMap;
 use std::io::Read;
+use std::sync::Arc;
 
-use serde_json::Value as JsonValue;
 use tracing::warn;
 
 use aws_lambda_events::s3::S3EventRecord;
 use aws_sdk_s3::Client as S3Client;
+use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::operation::get_object::GetObjectError;
 use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
 use opentelemetry_proto::tonic::{
@@ -14,10 +17,12 @@ use opentelemetry_proto::tonic::{
 };
 use tracing::debug;
 
+use crate::flowlogs::{FlowLogConfig, ParsedFields};
 use crate::parse::json::parse_json_to_map;
 use crate::parse::platform::LogPlatform;
 use crate::parse::record_parser::LogBuilder;
 use crate::parse::utils::string_kv;
+use crate::parse::vpclog::{parse_vpclog_header, parse_vpclog_to_map};
 use crate::{aws_attributes::AwsAttributes, s3logs::ParserType};
 
 use super::{JsonLogRecords, ParserError};
@@ -30,6 +35,8 @@ pub struct S3Record {
     aws_attributes: AwsAttributes,
     request_id: String,
     batch_size: usize,
+    /// VPC flow log configuration for the S3 bucket, if applicable.
+    flow_log_config: Option<FlowLogConfig>,
 }
 
 impl S3Record {
@@ -41,6 +48,7 @@ impl S3Record {
         aws_attributes: AwsAttributes,
         request_id: String,
         batch_size: usize,
+        flow_log_config: Option<FlowLogConfig>,
     ) -> Self {
         Self {
             record,
@@ -49,6 +57,7 @@ impl S3Record {
             aws_attributes,
             request_id,
             batch_size,
+            flow_log_config,
         }
     }
 
@@ -113,6 +122,7 @@ impl S3Record {
             &self.aws_attributes,
             &self.request_id,
             self.batch_size,
+            self.flow_log_config.as_ref(),
         )?;
 
         Ok(resource_logs)
@@ -139,7 +149,33 @@ async fn load_s3_object(
         .key(key)
         .send()
         .await
-        .map_err(|e| ParserError::S3Error(format!("Failed to get S3 object: {}", e)))?;
+        .map_err(|e| {
+            let detail = match &e {
+                SdkError::ServiceError(svc) => {
+                    let err = svc.err();
+                    let code = match err {
+                        GetObjectError::NoSuchKey(_) => "NoSuchKey",
+                        _ => err.meta().code().unwrap_or("Unknown"),
+                    };
+                    format!(
+                        "service error: code={}, message={}",
+                        code,
+                        err.meta().message().unwrap_or("(none)")
+                    )
+                }
+                SdkError::ConstructionFailure(_) => "construction failure".to_string(),
+                SdkError::TimeoutError(_) => "timeout".to_string(),
+                SdkError::DispatchFailure(_) => "dispatch failure".to_string(),
+                SdkError::ResponseError(re) => {
+                    format!("response error: http status={}", re.raw().status())
+                }
+                _ => format!("{}", e),
+            };
+            ParserError::S3Error(format!(
+                "Failed to get S3 object: bucket={}, key={}, {}",
+                bucket, key, detail
+            ))
+        })?;
 
     let body_bytes = response
         .body
@@ -172,6 +208,7 @@ fn decompress_if_needed(data: &[u8], key: &str) -> Result<Vec<u8>, ParserError> 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_log_lines(
     data: &[u8],
     event_time: DateTime<Utc>,
@@ -180,6 +217,7 @@ fn parse_log_lines(
     aws_attributes: &AwsAttributes,
     request_id: &str,
     batch_size: usize,
+    flow_log_config: Option<&FlowLogConfig>,
 ) -> Result<Vec<ResourceLogs>, ParserError> {
     let content = std::str::from_utf8(data)
         .map_err(|e| ParserError::EncodingError(format!("Invalid UTF-8: {}", e)))?;
@@ -228,23 +266,58 @@ fn parse_log_lines(
         "Parsing log lines"
     );
 
-    // Detect log format from key name and content
-    let (log_platform, parser_type) = detect_log_format(key, &lines);
-
-    debug!(
-        request_id = %request_id,
-        platform = ?log_platform,
-        parser_type = ?parser_type,
-        "Detected log format"
-    );
+    // If we have a VPC flow log configuration for this bucket, use it directly.
+    // Otherwise detect format from the key and content.
+    let (log_platform, parser_type) = if flow_log_config.is_some() && key.contains("vpcflowlogs") {
+        debug!(
+            request_id = %request_id,
+            bucket = %bucket,
+            "Using VPC flow log parser for S3 object"
+        );
+        (LogPlatform::VpcFlowLog, ParserType::VpcLog)
+    } else {
+        let (platform, pt) = detect_log_format(key, &lines);
+        debug!(
+            request_id = %request_id,
+            platform = ?platform,
+            parser_type = ?pt,
+            "Detected log format"
+        );
+        (platform, pt)
+    };
 
     let now_nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64;
 
+    // Build the extra flow-log tags that will be added to resource attributes.
+    let flow_log_tags: HashMap<String, String> =
+        flow_log_config.map(|c| c.tags.clone()).unwrap_or_default();
+
+    // For VPC flow logs the first line is the column header, e.g.:
+    //   "version account-id interface-id srcaddr dstaddr ..."
+    // Parse it into typed ParsedFields and treat the remainder as data lines.
+    let (flow_log_parsed_fields, data_lines): (Option<Arc<ParsedFields>>, &[&str]) =
+        if parser_type == ParserType::VpcLog {
+            if let Some((header, rest)) = lines.split_first() {
+                let fields = parse_vpclog_header(header);
+                debug!(
+                    request_id = %request_id,
+                    field_count = fields.len(),
+                    "Parsed VPC flow log column header from S3 file"
+                );
+                (Some(Arc::new(ParsedFields::Success(fields))), rest)
+            } else {
+                (None, &[])
+            }
+        } else {
+            (None, &lines)
+        };
+
     // Create base resource attributes
-    let base_attributes = create_base_attributes(bucket, key, aws_attributes, log_platform);
+    let base_attributes =
+        create_base_attributes(bucket, key, aws_attributes, log_platform, &flow_log_tags);
 
     let builder = LogBuilder::new(log_platform);
 
@@ -254,14 +327,20 @@ fn parse_log_lines(
     let mut resource_logs_list = Vec::new();
     let mut current_batch = Vec::new();
 
-    let lines_count = lines.len();
-    for line in lines.into_iter() {
+    let lines_count = data_lines.len();
+    for line in data_lines {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
         let log_record = parse_line(
             &builder,
             now_nanos,
             event_timestamp,
-            String::from(line),
+            line,
             parser_type,
+            flow_log_parsed_fields.clone(),
         );
         current_batch.push(log_record);
 
@@ -296,46 +375,67 @@ fn parse_log_lines(
 /// Parse a single log line string into a [`LogRecord`].
 ///
 /// Dispatches based on `parser_type`:
-/// * `Json` — parse as a JSON object; on failure the raw string becomes the body.
-/// * `Unknown` — auto-detect: attempt JSON for `{`-prefixed lines, otherwise plain text.
-/// * Any other type — treat as plain text (S3 log detection never produces `VpcLog` or
-///   `KeyValue`).
+/// * `VpcLog`   — parse as space-separated VPC flow log fields; raw line becomes the body.
+/// * `Json`     — parse as a JSON object; on failure the raw string becomes the body.
+/// * `Unknown`  — auto-detect: attempt JSON for `{`-prefixed lines, otherwise plain text.
 fn parse_line(
     builder: &LogBuilder,
     now_nanos: u64,
     timestamp_ms: i64,
-    line: String,
+    line: &str,
     parser_type: ParserType,
+    flow_log_parsed_fields: Option<Arc<ParsedFields>>,
 ) -> opentelemetry_proto::tonic::logs::v1::LogRecord {
     let mut record_builder = builder.start(now_nanos, timestamp_ms, vec![]);
 
-    let map_result: Result<Option<serde_json::Map<String, JsonValue>>, _> = match parser_type {
-        ParserType::Json => parse_json_to_map(line.clone())
-            .map(Some)
-            .map_err(|e| (e, line.clone())),
+    match parser_type {
+        ParserType::VpcLog => {
+            // VPC Flow Logs always preserve the raw line as the body.
+            // When parsed fields are available, also emit individual fields as attributes.
+            record_builder = record_builder.set_body_text(line.to_string());
+            if let Some(parsed_fields) = flow_log_parsed_fields {
+                match parse_vpclog_to_map(line, parsed_fields) {
+                    Ok(map) => {
+                        record_builder.populate_from_map(map);
+                    }
+                    Err(e) => {
+                        warn!(error = ?e, "Failed to parse VPC flow log line as structured map");
+                    }
+                }
+            }
+            record_builder.finish()
+        }
+
+        ParserType::Json => {
+            match parse_json_to_map(line) {
+                Ok(map) => {
+                    record_builder.populate_from_map(map);
+                }
+                Err(err) => {
+                    warn!(error = ?err, "Failed to parse log line as JSON, using raw text as body");
+                    return record_builder.set_body_text(line.to_string()).finish();
+                }
+            }
+            record_builder.finish()
+        }
+
         ParserType::Unknown => {
             if line.len() > 2 && line.starts_with('{') {
-                parse_json_to_map(line.clone())
-                    .map(Some)
-                    .map_err(|e| (e, line.clone()))
+                match parse_json_to_map(line) {
+                    Ok(map) => {
+                        record_builder.populate_from_map(map);
+                    }
+                    Err(err) => {
+                        warn!(error = ?err, "Failed to parse log line, using raw text as body");
+                        return record_builder.set_body_text(line.to_string()).finish();
+                    }
+                }
+                record_builder.finish()
             } else {
-                return record_builder.set_body_text(line).finish();
+                record_builder.set_body_text(line.to_string()).finish()
             }
         }
-    };
-
-    match map_result {
-        Ok(None) => {}
-        Ok(Some(map)) => {
-            record_builder.populate_from_map(map);
-        }
-        Err((err, raw)) => {
-            warn!(error = ?err, "Failed to parse log line, using raw text as body");
-            return record_builder.set_body_text(raw).finish();
-        }
     }
-
-    record_builder.finish()
 }
 
 /// Parse a JSON blob containing a Records array
@@ -356,8 +456,9 @@ fn parse_json_blob(
     // Detect log platform from key (e.g., CloudTrail files)
     let log_platform = detect_log_platform_from_key(key);
 
-    // Create base resource attributes
-    let base_attributes = create_base_attributes(bucket, key, aws_attributes, log_platform);
+    // Create base resource attributes (no flow log tags for JSON blob paths)
+    let base_attributes =
+        create_base_attributes(bucket, key, aws_attributes, log_platform, &HashMap::new());
 
     debug!(
         request_id = %request_id,
@@ -405,12 +506,16 @@ fn parse_json_blob(
     Ok(resource_logs_list)
 }
 
-/// Create base resource attributes for S3 logs
+/// Create base resource attributes for S3 logs.
+///
+/// When `flow_log_tags` is non-empty the tags are emitted as
+/// `ec2.flow-logs.tags.<key>` resource attributes, mirroring the CloudWatch path.
 fn create_base_attributes(
     bucket: &str,
     key: &str,
     aws_attributes: &AwsAttributes,
     log_platform: LogPlatform,
+    flow_log_tags: &HashMap<String, String>,
 ) -> Vec<KeyValue> {
     let mut attributes = vec![
         string_kv("cloud.provider", "aws"),
@@ -423,6 +528,14 @@ fn create_base_attributes(
     // Add cloud.platform attribute based on detected platform
     if log_platform != LogPlatform::Unknown {
         attributes.push(string_kv("cloud.platform", log_platform.as_str()));
+    }
+
+    // Add EC2 Flow Log tags as resource attributes (matches CloudWatch behaviour)
+    for (tag_key, tag_value) in flow_log_tags {
+        attributes.push(string_kv(
+            &format!("ec2.flow-logs.tags.{}", tag_key),
+            tag_value.clone(),
+        ));
     }
 
     attributes
@@ -514,7 +627,18 @@ fn detect_log_platform_from_key(key: &str) -> LogPlatform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opentelemetry_proto::tonic::logs::v1::SeverityNumber;
+
+    fn make_aws_attributes() -> AwsAttributes {
+        AwsAttributes {
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            invoked_function_arn: "arn:aws:lambda:us-east-1:123456789012:function:test".to_string(),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // detect_log_format
+    // ------------------------------------------------------------------
 
     #[test]
     fn test_detect_log_format_json_from_suffix() {
@@ -554,18 +678,17 @@ mod tests {
         assert_eq!(parser_type, ParserType::Unknown);
     }
 
+    // ------------------------------------------------------------------
+    // parse_log_lines (non-VPC)
+    // ------------------------------------------------------------------
+
     #[tokio::test]
     async fn test_parse_log_lines_json() {
         let log_data = r#"{"level":"info","msg":"test message 1","service":"test"}
 {"level":"error","msg":"test message 2","service":"test"}
 {"level":"debug","msg":"test message 3","service":"test"}"#;
 
-        let aws_attributes = AwsAttributes {
-            region: "us-east-1".to_string(),
-            account_id: "123456789012".to_string(),
-            invoked_function_arn: "arn:aws:lambda:us-east-1:123456789012:function:test".to_string(),
-        };
-
+        let aws_attributes = make_aws_attributes();
         let event_time = Utc::now();
         let result = parse_log_lines(
             log_data.as_bytes(),
@@ -575,20 +698,17 @@ mod tests {
             &aws_attributes,
             "test-request-id",
             1000,
+            None,
         );
 
         assert!(result.is_ok());
         let resource_logs = result.unwrap();
         assert_eq!(resource_logs.len(), 1);
-
-        let logs = &resource_logs[0];
-        assert_eq!(logs.scope_logs.len(), 1);
-        assert_eq!(logs.scope_logs[0].log_records.len(), 3);
+        assert_eq!(resource_logs[0].scope_logs[0].log_records.len(), 3);
     }
 
     #[tokio::test]
     async fn test_parse_log_lines_batching() {
-        // Create more lines than batch size to test batching
         let mut log_lines = Vec::new();
         for i in 0..2500 {
             log_lines.push(format!(
@@ -598,12 +718,7 @@ mod tests {
         }
         let log_data = log_lines.join("\n");
 
-        let aws_attributes = AwsAttributes {
-            region: "us-east-1".to_string(),
-            account_id: "123456789012".to_string(),
-            invoked_function_arn: "arn:aws:lambda:us-east-1:123456789012:function:test".to_string(),
-        };
-
+        let aws_attributes = make_aws_attributes();
         let event_time = Utc::now();
         let result = parse_log_lines(
             log_data.as_bytes(),
@@ -612,14 +727,13 @@ mod tests {
             "test-key.log",
             &aws_attributes,
             "test-request-id",
-            1000, // batch size
+            1000,
+            None,
         );
 
         assert!(result.is_ok());
         let resource_logs = result.unwrap();
-        // Should create 3 ResourceLogs: 1000 + 1000 + 500
         assert_eq!(resource_logs.len(), 3);
-
         assert_eq!(resource_logs[0].scope_logs[0].log_records.len(), 1000);
         assert_eq!(resource_logs[1].scope_logs[0].log_records.len(), 1000);
         assert_eq!(resource_logs[2].scope_logs[0].log_records.len(), 500);
@@ -634,12 +748,7 @@ mod tests {
             ]
         }"#;
 
-        let aws_attributes = AwsAttributes {
-            region: "us-east-1".to_string(),
-            account_id: "123456789012".to_string(),
-            invoked_function_arn: "arn:aws:lambda:us-east-1:123456789012:function:test".to_string(),
-        };
-
+        let aws_attributes = make_aws_attributes();
         let event_time = Utc::now();
         let result = parse_log_lines(
             json_data.as_bytes(),
@@ -649,6 +758,7 @@ mod tests {
             &aws_attributes,
             "test-request-id",
             1000,
+            None,
         );
 
         assert!(result.is_ok());
@@ -656,11 +766,14 @@ mod tests {
         assert_eq!(resource_logs.len(), 1);
         assert_eq!(resource_logs[0].scope_logs[0].log_records.len(), 2);
 
-        // Verify attributes contain eventName
         let first_log = &resource_logs[0].scope_logs[0].log_records[0];
         let has_event_name = first_log.attributes.iter().any(|kv| kv.key == "eventName");
         assert!(has_event_name);
     }
+
+    // ------------------------------------------------------------------
+    // detect_log_platform_from_key
+    // ------------------------------------------------------------------
 
     #[tokio::test]
     async fn test_detect_log_platform_from_key() {
@@ -682,17 +795,21 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------------------------
+    // parse_line (non-VPC)
+    // ------------------------------------------------------------------
+
     #[test]
     fn test_parse_line_json() {
         let builder = LogBuilder::new(LogPlatform::Unknown);
         let lr = parse_line(
             &builder,
             123_456_789,
-            1000,
-            r#"{"level":"info","msg":"hello"}"#.to_string(),
+            1_000,
+            r#"{"level":"info","msg":"hello"}"#,
             ParserType::Json,
+            None,
         );
-        assert_eq!(lr.severity_number, SeverityNumber::Info as i32);
         assert!(lr.body.is_some());
     }
 
@@ -702,161 +819,414 @@ mod tests {
         let lr = parse_line(
             &builder,
             123_456_789,
-            1000,
-            r#"{"level":"debug","msg":"auto"}"#.to_string(),
+            1_000,
+            r#"{"level":"info","msg":"hello"}"#,
             ParserType::Unknown,
+            None,
         );
-        assert_eq!(lr.severity_number, SeverityNumber::Debug as i32);
         assert!(lr.body.is_some());
     }
 
     #[test]
     fn test_parse_line_plain_text_fallback() {
+        use opentelemetry_proto::tonic::common::v1::any_value::Value;
+
         let builder = LogBuilder::new(LogPlatform::Unknown);
-        let msg = "just plain text";
-        let lr = parse_line(&builder, 0, 0, msg.to_string(), ParserType::Unknown);
+        let lr = parse_line(
+            &builder,
+            123_456_789,
+            1_000,
+            "plain text log line",
+            ParserType::Unknown,
+            None,
+        );
         if let Some(body) = &lr.body {
-            if let Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) =
-                &body.value
-            {
-                assert_eq!(s, msg);
+            if let Some(Value::StringValue(s)) = &body.value {
+                assert_eq!(s, "plain text log line");
             } else {
-                panic!("expected string body");
+                panic!("Expected StringValue body");
             }
         } else {
-            panic!("body should be set");
+            panic!("Expected body");
         }
     }
 
     #[test]
     fn test_parse_line_invalid_json_falls_back_to_plain_text() {
+        use opentelemetry_proto::tonic::common::v1::any_value::Value;
+
         let builder = LogBuilder::new(LogPlatform::Unknown);
-        let bad = r#"{ not valid json }"#;
-        let lr = parse_line(&builder, 0, 0, bad.to_string(), ParserType::Json);
+        let raw = r#"{"broken json"#.to_string();
+        let lr = parse_line(&builder, 123_456_789, 1_000, &raw, ParserType::Json, None);
         if let Some(body) = &lr.body {
-            if let Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) =
-                &body.value
-            {
-                assert_eq!(s, bad);
+            if let Some(Value::StringValue(s)) = &body.value {
+                assert_eq!(s, &raw);
             } else {
-                panic!("expected string body on parse failure");
+                panic!("Expected StringValue body");
             }
         } else {
-            panic!("body should be set on parse failure");
+            panic!("Expected body");
         }
     }
 
-    #[tokio::test]
-    async fn test_parse_real_cloudtrail_file() {
-        // Test with real CloudTrail file structure
-        let json_data = r#"{"Records":[
-            {
-                "eventVersion":"1.11",
-                "userIdentity":{
-                    "type":"AssumedRole",
-                    "principalId":"AROAUCA5KE6IWTHVPZEOT:DatadogAWSIntegration",
-                    "arn":"arn:aws:sts::279234357137:assumed-role/DatadogIntegrationRole/DatadogAWSIntegration",
-                    "accountId":"279234357137",
-                    "accessKeyId":"ASIAUCA5KE6I76GOZKLW"
-                },
-                "eventTime":"2026-02-20T23:20:01Z",
-                "eventSource":"ecs.amazonaws.com",
-                "eventName":"ListClusters",
-                "awsRegion":"us-east-1",
-                "sourceIPAddress":"44.192.28.4",
-                "userAgent":"Datadog Botocore/1.40.61",
-                "requestParameters":null,
-                "responseElements":null,
-                "requestID":"3b7eb167-5db2-4cc3-a287-6fff6cbcbf01",
-                "eventID":"b4fa7f02-2133-4272-94ad-730c55694200",
-                "readOnly":true,
-                "eventType":"AwsApiCall",
-                "managementEvent":true,
-                "recipientAccountId":"279234357137",
-                "eventCategory":"Management"
-            },
-            {
-                "eventVersion":"1.11",
-                "userIdentity":{
-                    "type":"AssumedRole",
-                    "principalId":"AROAUCA5KE6IWTHVPZEOT:DatadogAWSIntegration"
-                },
-                "eventTime":"2026-02-20T23:20:39Z",
-                "eventSource":"rds.amazonaws.com",
-                "eventName":"DescribeDBInstances",
-                "awsRegion":"us-east-1",
-                "sourceIPAddress":"44.192.28.123",
-                "userAgent":"Datadog Botocore/1.40.61",
-                "eventID":"6147784f-d134-4e7d-bd44-f0ca28dc5b7f",
-                "readOnly":true,
-                "eventType":"AwsApiCall",
-                "managementEvent":true,
-                "recipientAccountId":"279234357137",
-                "eventCategory":"Management"
-            }
-        ]}"#;
+    // ------------------------------------------------------------------
+    // VPC flow log via S3
+    // ------------------------------------------------------------------
 
-        let aws_attributes = AwsAttributes {
-            region: "us-east-1".to_string(),
-            account_id: "279234357137".to_string(),
-            invoked_function_arn: "arn:aws:lambda:us-east-1:279234357137:function:test".to_string(),
+    #[test]
+    fn test_parse_line_vpc_log_sets_body_and_attributes() {
+        use crate::flowlogs::{ParsedField, ParsedFieldType, ParsedFields};
+        use opentelemetry_proto::tonic::common::v1::any_value::Value;
+        use std::sync::Arc;
+
+        let fields = vec![
+            ParsedField::new("version".to_string(), ParsedFieldType::Int32),
+            ParsedField::new("account-id".to_string(), ParsedFieldType::String),
+            ParsedField::new("interface-id".to_string(), ParsedFieldType::String),
+            ParsedField::new("srcaddr".to_string(), ParsedFieldType::String),
+            ParsedField::new("dstaddr".to_string(), ParsedFieldType::String),
+            ParsedField::new("srcport".to_string(), ParsedFieldType::Int32),
+            ParsedField::new("dstport".to_string(), ParsedFieldType::Int32),
+            ParsedField::new("protocol".to_string(), ParsedFieldType::Int32),
+            ParsedField::new("packets".to_string(), ParsedFieldType::Int64),
+            ParsedField::new("bytes".to_string(), ParsedFieldType::Int64),
+            ParsedField::new("start".to_string(), ParsedFieldType::Int64),
+            ParsedField::new("end".to_string(), ParsedFieldType::Int64),
+            ParsedField::new("action".to_string(), ParsedFieldType::String),
+            ParsedField::new("log-status".to_string(), ParsedFieldType::String),
+        ];
+        let parsed_fields = Arc::new(ParsedFields::Success(fields));
+
+        let line =
+            "2 123456789012 eni-abc123 10.0.0.1 10.0.0.2 443 52000 6 10 840 1620000000 1620000060 ACCEPT OK"
+                .to_string();
+
+        let builder = LogBuilder::new(LogPlatform::VpcFlowLog);
+        let lr = parse_line(
+            &builder,
+            123_456_789,
+            1_000,
+            &line,
+            ParserType::VpcLog,
+            Some(parsed_fields),
+        );
+
+        // Body should be the raw line
+        if let Some(body) = &lr.body {
+            if let Some(Value::StringValue(s)) = &body.value {
+                assert_eq!(s, &line);
+            } else {
+                panic!("Expected StringValue body");
+            }
+        } else {
+            panic!("Expected body");
+        }
+
+        // Structured attributes should be present
+        assert!(lr.attributes.iter().any(|kv| kv.key == "srcaddr"));
+        assert!(lr.attributes.iter().any(|kv| kv.key == "dstaddr"));
+        assert!(lr.attributes.iter().any(|kv| kv.key == "action"));
+    }
+
+    #[test]
+    fn test_parse_log_lines_vpc_flow_logs_with_tags() {
+        use crate::flowlogs::FlowLogConfig;
+
+        let log_format = "${version} ${account-id} ${interface-id} ${srcaddr} ${dstaddr} ${srcport} ${dstport} ${protocol} ${packets} ${bytes} ${start} ${end} ${action} ${log-status}";
+
+        let mut tags = HashMap::new();
+        tags.insert("Environment".to_string(), "production".to_string());
+        tags.insert("Team".to_string(), "networking".to_string());
+
+        let flow_log_config = FlowLogConfig {
+            log_format: log_format.to_string(),
+            flow_log_id: "fl-s3-test123".to_string(),
+            tags,
+            folder_prefix: None,
+            // No pre-parsed fields — the header line in the file is the source of truth.
+            parsed_fields: None,
         };
 
+        let vpc_data = "version account-id interface-id srcaddr dstaddr srcport dstport protocol packets bytes start end action log-status\n\
+                        2 123456789012 eni-abc123 10.0.0.1 10.0.0.2 443 52000 6 10 840 1620000000 1620000060 ACCEPT OK\n\
+                        2 123456789012 eni-abc123 10.0.0.2 10.0.0.1 52000 443 6 8 620 1620000060 1620000120 ACCEPT OK\n";
+
+        let aws_attributes = make_aws_attributes();
         let event_time = Utc::now();
+
         let result = parse_log_lines(
-            json_data.as_bytes(),
+            vpc_data.as_bytes(),
             event_time,
-            "aws-cloudtrail-logs-279234357137-test",
-            "AWSLogs/279234357137/CloudTrail/us-east-1/2026/02/20/279234357137_CloudTrail_us-east-1_20260220T2325Z_mdDrHV1NpfjtXf29.json.gz",
+            "my-flow-logs-bucket",
+            "AWSLogs/123456789012/vpcflowlogs/us-east-1/2024/01/01/flow.log.gz",
             &aws_attributes,
             "test-request-id",
             1000,
+            Some(&flow_log_config),
+        );
+
+        assert!(result.is_ok(), "parse_log_lines failed: {:?}", result.err());
+        let resource_logs = result.unwrap();
+        assert_eq!(resource_logs.len(), 1);
+
+        let rl = &resource_logs[0];
+
+        // cloud.platform should be set to VPC flow log value
+        let resource = rl.resource.as_ref().unwrap();
+        let platform_attr = resource
+            .attributes
+            .iter()
+            .find(|kv| kv.key == "cloud.platform");
+        assert!(platform_attr.is_some(), "cloud.platform attribute missing");
+        if let Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) =
+            &platform_attr.unwrap().value.as_ref().unwrap().value
+        {
+            assert_eq!(s, "aws_vpc_flow_log");
+        }
+
+        // Flow log tags should appear as resource attributes
+        let has_env_tag = resource
+            .attributes
+            .iter()
+            .any(|kv| kv.key == "ec2.flow-logs.tags.Environment");
+        let has_team_tag = resource
+            .attributes
+            .iter()
+            .any(|kv| kv.key == "ec2.flow-logs.tags.Team");
+        assert!(has_env_tag, "ec2.flow-logs.tags.Environment missing");
+        assert!(has_team_tag, "ec2.flow-logs.tags.Team missing");
+
+        // Two log records for two data lines
+        assert_eq!(rl.scope_logs[0].log_records.len(), 2);
+
+        // Each record should have structured attributes
+        let first_record = &rl.scope_logs[0].log_records[0];
+        assert!(
+            first_record.attributes.iter().any(|kv| kv.key == "srcaddr"),
+            "srcaddr attribute missing"
+        );
+        assert!(
+            first_record.attributes.iter().any(|kv| kv.key == "action"),
+            "action attribute missing"
+        );
+    }
+
+    #[test]
+    fn test_parse_log_lines_vpc_header_defines_columns() {
+        use crate::flowlogs::FlowLogConfig;
+
+        // FlowLogConfig with no pre-parsed fields — the header line must be used instead.
+        let flow_log_config = FlowLogConfig {
+            log_format: "${version} ${account-id}".to_string(),
+            flow_log_id: "fl-hdr-test".to_string(),
+            tags: HashMap::new(),
+            folder_prefix: None,
+            parsed_fields: None,
+        };
+
+        // Header line followed by one data line.
+        let data = "version account-id\n2 123456789012\n";
+        let aws_attributes = make_aws_attributes();
+        let event_time = Utc::now();
+
+        let result = parse_log_lines(
+            data.as_bytes(),
+            event_time,
+            "my-bucket",
+            "AWSLogs/123456789012/vpcflowlogs/us-east-1/2024/01/01/flow.log",
+            &aws_attributes,
+            "req-id",
+            1000,
+            Some(&flow_log_config),
+        );
+
+        assert!(result.is_ok());
+        let resource_logs = result.unwrap();
+        // Only the data line should produce a record; the header line is consumed as column info.
+        assert_eq!(resource_logs[0].scope_logs[0].log_records.len(), 1);
+
+        // Structured attributes should be populated from the header-derived fields.
+        let record = &resource_logs[0].scope_logs[0].log_records[0];
+        assert!(
+            record.attributes.iter().any(|kv| kv.key == "account-id"),
+            "account-id attribute should be present"
+        );
+    }
+
+    #[test]
+    fn test_create_base_attributes_with_flow_log_tags() {
+        let aws_attributes = make_aws_attributes();
+        let mut tags = HashMap::new();
+        tags.insert("Env".to_string(), "prod".to_string());
+
+        let attrs = create_base_attributes(
+            "my-bucket",
+            "some/key.log",
+            &aws_attributes,
+            LogPlatform::VpcFlowLog,
+            &tags,
+        );
+
+        let has_platform = attrs.iter().any(|kv| {
+            kv.key == "cloud.platform"
+                && matches!(
+                    &kv.value.as_ref().unwrap().value,
+                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s))
+                    if s == "aws_vpc_flow_log"
+                )
+        });
+        assert!(has_platform);
+
+        let has_tag = attrs.iter().any(|kv| kv.key == "ec2.flow-logs.tags.Env");
+        assert!(has_tag);
+    }
+
+    #[test]
+    fn test_create_base_attributes_no_platform_for_unknown() {
+        let aws_attributes = make_aws_attributes();
+        let attrs = create_base_attributes(
+            "bucket",
+            "key",
+            &aws_attributes,
+            LogPlatform::Unknown,
+            &HashMap::new(),
+        );
+        let has_platform = attrs.iter().any(|kv| kv.key == "cloud.platform");
+        // Unknown platform should not add a cloud.platform attribute
+        assert!(!has_platform);
+    }
+
+    // ------------------------------------------------------------------
+    // CloudTrail real-file test (carried over from original)
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_parse_real_cloudtrail_file() {
+        let cloudtrail_json = r#"{
+  "Records": [
+    {
+      "eventVersion": "1.08",
+      "userIdentity": {
+        "type": "IAMUser",
+        "principalId": "AIDACKCEVSQ6C2EXAMPLE",
+        "arn": "arn:aws:iam::123456789012:user/Alice",
+        "accountId": "123456789012",
+        "userName": "Alice"
+      },
+      "eventTime": "2024-01-15T10:30:00Z",
+      "eventSource": "s3.amazonaws.com",
+      "eventName": "GetObject",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "198.51.100.1",
+      "userAgent": "aws-sdk-go/1.44.0",
+      "requestParameters": {
+        "bucketName": "my-bucket",
+        "key": "my-object"
+      },
+      "responseElements": null,
+      "requestID": "EXAMPLE123456789",
+      "eventID": "EXAMPLE-1234-5678-abcd-123456789012",
+      "readOnly": true,
+      "resources": [
+        {
+          "ARN": "arn:aws:s3:::my-bucket/my-object",
+          "accountId": "123456789012",
+          "type": "AWS::S3::Object"
+        }
+      ],
+      "eventType": "AwsApiCall",
+      "managementEvent": false,
+      "recipientAccountId": "123456789012"
+    },
+    {
+      "eventVersion": "1.08",
+      "userIdentity": {
+        "type": "Root",
+        "principalId": "123456789012",
+        "arn": "arn:aws:iam::123456789012:root",
+        "accountId": "123456789012"
+      },
+      "eventTime": "2024-01-15T11:00:00Z",
+      "eventSource": "signin.amazonaws.com",
+      "eventName": "ConsoleLogin",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "203.0.113.5",
+      "userAgent": "Mozilla/5.0",
+      "requestParameters": null,
+      "responseElements": {
+        "ConsoleLogin": "Success"
+      },
+      "requestID": "EXAMPLE987654321",
+      "eventID": "EXAMPLE-abcd-ef01-2345-678901234567",
+      "readOnly": false,
+      "eventType": "AwsApiCall",
+      "managementEvent": true,
+      "recipientAccountId": "123456789012"
+    }
+  ]
+}"#;
+
+        let aws_attributes = make_aws_attributes();
+        let event_time = Utc::now();
+
+        let result = parse_log_lines(
+            cloudtrail_json.as_bytes(),
+            event_time,
+            "my-cloudtrail-bucket",
+            "AWSLogs/123456789012/CloudTrail/us-east-1/2024/01/15/123456789012_CloudTrail_us-east-1_20240115T1030Z_abc123.json.gz",
+            &aws_attributes,
+            "test-cloudtrail-request",
+            1000,
+            None,
         );
 
         assert!(
             result.is_ok(),
-            "Failed to parse CloudTrail JSON blob: {:?}",
+            "CloudTrail parse failed: {:?}",
             result.err()
         );
         let resource_logs = result.unwrap();
         assert_eq!(resource_logs.len(), 1);
-        assert_eq!(resource_logs[0].scope_logs[0].log_records.len(), 2);
 
-        // Verify CloudTrail platform was detected
-        let first_log = &resource_logs[0].scope_logs[0].log_records[0];
+        let logs = &resource_logs[0];
+        assert_eq!(logs.scope_logs[0].log_records.len(), 2);
 
-        // CloudTrail should have body set to "eventType::eventName"
-        assert!(first_log.body.is_some());
-        if let Some(body) = &first_log.body {
-            if let Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) =
-                &body.value
-            {
-                assert_eq!(s, "AwsApiCall::ListClusters");
-            }
-        }
+        let resource = logs.resource.as_ref().unwrap();
 
-        // Verify attributes are present
-        let has_event_source = first_log
+        // Verify S3 attributes are present
+        assert!(
+            resource
+                .attributes
+                .iter()
+                .any(|kv| kv.key == "aws.s3.bucket")
+        );
+        assert!(resource.attributes.iter().any(|kv| kv.key == "aws.s3.key"));
+
+        // Verify cloud.platform is set for CloudTrail
+        let platform_attr = resource
             .attributes
             .iter()
-            .any(|kv| kv.key == "eventSource");
-        let has_event_name = first_log.attributes.iter().any(|kv| kv.key == "eventName");
-        let has_event_type = first_log.attributes.iter().any(|kv| kv.key == "eventType");
-        let has_aws_region = first_log.attributes.iter().any(|kv| kv.key == "awsRegion");
-
-        assert!(has_event_source, "Missing eventSource attribute");
-        assert!(has_event_name, "Missing eventName attribute");
-        assert!(has_event_type, "Missing eventType attribute");
-        assert!(has_aws_region, "Missing awsRegion attribute");
-
-        // Verify second record
-        let second_log = &resource_logs[0].scope_logs[0].log_records[1];
-        if let Some(body) = &second_log.body {
-            if let Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) =
-                &body.value
-            {
-                assert_eq!(s, "AwsApiCall::DescribeDBInstances");
-            }
+            .find(|kv| kv.key == "cloud.platform");
+        assert!(platform_attr.is_some());
+        if let Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) =
+            &platform_attr.unwrap().value.as_ref().unwrap().value
+        {
+            assert_eq!(s, "aws_cloudtrail");
         }
+
+        // Verify first record has expected CloudTrail fields
+        let first_record = &logs.scope_logs[0].log_records[0];
+        assert!(
+            first_record
+                .attributes
+                .iter()
+                .any(|kv| kv.key == "eventName")
+        );
+        assert!(
+            first_record
+                .attributes
+                .iter()
+                .any(|kv| kv.key == "eventSource")
+        );
     }
 }

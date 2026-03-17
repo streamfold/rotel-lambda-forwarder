@@ -213,7 +213,7 @@ async fn run_forwarder(
 
     // Initialize FlowLogManager
     let ec2_client = aws_sdk_ec2::Client::new(&aws_config);
-    let mut flow_log_manager = rotel_lambda_forwarder::flowlogs::FlowLogManager::new(
+    let flow_log_manager = rotel_lambda_forwarder::flowlogs::FlowLogManager::new(
         ec2_client,
         s3_client_clone,
         s3_bucket_clone,

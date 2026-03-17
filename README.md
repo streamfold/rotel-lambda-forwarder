@@ -34,7 +34,7 @@ be expanded as we verify support for additional services.
 | CloudTrail Logs        | CloudWatch, S3 |
 | EKS Control Plane Logs | CloudWatch     |
 | Lambda Logs            | CloudWatch     |
-| VPC Flow Logs          | CloudWatch     |
+| VPC Flow Logs          | CloudWatch, S3 |
 
 ## Deploying
 
@@ -569,7 +569,7 @@ from. We plan to make this configurable in the future.
 
 ## VPC Flow Logs
 
-The forwarder includes comprehensive support for AWS VPC Flow Logs with the following features:
+The forwarder includes support for ingesting AWS VPC Flow Logs written to CloudWatch or S3.
 
 ### Automatic Format Detection
 

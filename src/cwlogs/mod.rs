@@ -27,7 +27,7 @@ pub struct Parser<'a> {
     aws_attributes: &'a AwsAttributes,
     request_id: &'a String,
     tag_manager: &'a mut TagManager,
-    flow_log_manager: &'a mut FlowLogManager,
+    flow_log_manager: &'a FlowLogManager,
 }
 
 impl<'a> Parser<'a> {
@@ -35,7 +35,7 @@ impl<'a> Parser<'a> {
         aws_attributes: &'a AwsAttributes,
         request_id: &'a String,
         tag_manager: &'a mut TagManager,
-        flow_log_manager: &'a mut FlowLogManager,
+        flow_log_manager: &'a FlowLogManager,
     ) -> Self {
         Self {
             aws_attributes,
@@ -192,7 +192,7 @@ impl<'a> Parser<'a> {
     /// Detects the log platform and parser type based on log group and stream names.
     /// Returns (platform, parser_type, optional_flow_log_parsed_fields, flow_log_tags)
     async fn detect_log_type(
-        &mut self,
+        &self,
         log_group_name: &str,
         log_stream_name: &str,
     ) -> (
@@ -257,13 +257,13 @@ mod tests {
         let mut tag_manager = crate::tags::TagManager::new(cw_client, None, None);
 
         let ec2_client = aws_sdk_ec2::Client::new(&config);
-        let mut flow_log_manager = crate::flowlogs::FlowLogManager::new(ec2_client, None, None);
+        let flow_log_manager = crate::flowlogs::FlowLogManager::new(ec2_client, None, None);
 
         let mut parser = Parser::new(
             &aws_attributes,
             &request_id,
             &mut tag_manager,
-            &mut flow_log_manager,
+            &flow_log_manager,
         );
         let result = parser.parse(logs_event).await;
 
